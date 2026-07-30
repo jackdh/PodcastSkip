@@ -4,6 +4,27 @@ const error = (message, status = 400) =>
     headers: { 'content-type': 'application/json; charset=utf-8' },
   })
 
+const isPublicHttpsUrl = (url) => {
+  const host = url.hostname.toLowerCase()
+  const privateIpv4 = /^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/
+  const privateIpv6 = /^(::1$|::$|fc|fd|fe80:)/i
+  return url.protocol === 'https:' && !url.username && !url.password &&
+    !/(^localhost$|\.local$)/.test(host) && !privateIpv4.test(host) && !privateIpv6.test(host)
+}
+
+const fetchValidatedAudio = async (initialUrl, headers) => {
+  let currentUrl = initialUrl
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    if (!isPublicHttpsUrl(currentUrl)) throw new Error('Unsafe audio source')
+    const response = await fetch(currentUrl, { headers, redirect: 'manual' })
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response
+    const location = response.headers.get('location')
+    if (!location) throw new Error('Invalid audio redirect')
+    currentUrl = new URL(location, currentUrl)
+  }
+  throw new Error('Too many audio redirects')
+}
+
 export async function onRequestGet({ request }) {
   const url = new URL(request.url)
   const source = url.searchParams.get('source')
@@ -15,8 +36,7 @@ export async function onRequestGet({ request }) {
   } catch {
     return error('The audio source is invalid.')
   }
-  const blockedHost = /(^localhost$|\.local$|^127\.|^0\.0\.0\.0$|^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[0-1])\.)/
-  if (upstreamUrl.protocol !== 'https:' || upstreamUrl.username || upstreamUrl.password || blockedHost.test(upstreamUrl.hostname)) {
+  if (!isPublicHttpsUrl(upstreamUrl)) {
     return error('Only public HTTPS podcast audio is supported.')
   }
 
@@ -24,7 +44,7 @@ export async function onRequestGet({ request }) {
     const upstreamHeaders = new Headers()
     const range = request.headers.get('range')
     if (range) upstreamHeaders.set('range', range)
-    const upstream = await fetch(upstreamUrl, { headers: upstreamHeaders, redirect: 'follow' })
+    const upstream = await fetchValidatedAudio(upstreamUrl, upstreamHeaders)
     if (!upstream.ok && upstream.status !== 206) return error('The publisher could not provide this audio.', 502)
     const contentType = upstream.headers.get('content-type') ?? ''
     if (!contentType.startsWith('audio/') && !contentType.includes('octet-stream')) {
