@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Bell, ChevronDown, Clock3, Download, Headphones, Home,
-  Library, MoreHorizontal, Pause, Play, Plus, Search,
+  Library, MoreHorizontal, Pause, Play, Plus, RotateCcw, RotateCw, Search,
   Settings, Share2, SkipForward, Sparkles, WandSparkles, X
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
@@ -309,7 +309,7 @@ function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, on
 }
 
 function FullPlayer({ episode, playing, onPlay, currentTime, duration, onSeek, onClose }: { episode: Episode; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; onClose: () => void }) {
-  return <div className="full-player-backdrop" onClick={onClose}><section className="full-player" role="dialog" aria-modal="true" aria-label="Player controls" onClick={event => event.stopPropagation()}><i className="sheet-handle"/><button className="close full-close" onClick={onClose} aria-label="Close player"><X/></button><span className="show-name">{episode.show}</span><h2>{episode.title}</h2><div className="full-track"><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{formatTime(currentTime)}</span><span>{duration ? formatTime(duration) : episode.duration}</span></div><div className="full-controls"><button onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><SkipForward className="flip" size={28}/><small>15</small></button><button className="full-play" onClick={onPlay}>{playing ? <Pause fill="currentColor" size={30}/> : <Play fill="currentColor" size={30}/>}</button><button onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><SkipForward size={28}/><small>30</small></button></div></section></div>
+  return <div className="full-player-backdrop" onClick={onClose}><section className="full-player" role="dialog" aria-modal="true" aria-label="Player controls" onClick={event => event.stopPropagation()}><button className="close full-close" onClick={onClose} aria-label="Close player"><X size={20}/></button><span className="show-name">{episode.show}</span><h2>{episode.title}</h2><div className="full-track"><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{formatTime(currentTime)}</span><span>{duration ? formatTime(duration) : episode.duration}</span></div><div className="full-controls"><button className="skip-control" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><RotateCcw size={34} strokeWidth={1.75}/><span>15</span></button><button className="full-play" onClick={onPlay}>{playing ? <Pause fill="currentColor" size={28}/> : <Play fill="currentColor" size={28}/>}</button><button className="skip-control" onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><RotateCw size={34} strokeWidth={1.75}/><span>30</span></button></div></section></div>
 }
 
 function formatTime(seconds: number) {
