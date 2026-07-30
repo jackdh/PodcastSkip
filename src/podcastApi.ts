@@ -9,6 +9,7 @@ export type Episode = {
   duration: string
   artwork?: string
   audioUrl?: string
+  downloadBytes?: number
 }
 
 export type PodcastShow = {
