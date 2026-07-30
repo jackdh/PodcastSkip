@@ -22,16 +22,7 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
-        globPatterns: ['**/*.{js,css,html,svg,png,ico}'],
-        runtimeCaching: [{
-          urlPattern: ({ url }) => url.pathname === '/api/audio',
-          handler: 'CacheFirst',
-          options: {
-            cacheName: 'podflow-downloads-v1',
-            expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 * 24 * 30 },
-            cacheableResponse: { statuses: [0, 200] }
-          }
-        }]
+        globPatterns: ['**/*.{js,css,html,svg,png,ico}']
       }
     })])
   ]

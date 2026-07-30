@@ -40,6 +40,7 @@ function App() {
   const [playerOpen, setPlayerOpen] = useState(false)
   const [storageUsage, setStorageUsage] = useState({ usage: 0, quota: 0 })
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
   const refreshStorageUsage = async () => {
     if (!navigator.storage?.estimate) return
     const { usage = 0, quota = 0 } = await navigator.storage.estimate()
@@ -54,6 +55,13 @@ function App() {
       setModel(parsed.model ?? 'google/gemini-2.5-flash')
       setApiKey(parsed.apiKey ?? '')
     }
+    try {
+      const nowPlaying = JSON.parse(localStorage.getItem('podflow-now-playing') ?? 'null') as { episode?: Episode; position?: number } | null
+      if (nowPlaying?.episode?.audioUrl) {
+        pendingResumeRef.current = { id: nowPlaying.episode.id, position: nowPlaying.position ?? 0 }
+        setActiveEpisode(nowPlaying.episode)
+      }
+    } catch { /* Ignore malformed local playback state. */ }
   }, [])
 
   useEffect(() => {
@@ -77,6 +85,20 @@ function App() {
     })
     return () => { cancelled = true }
   }, [followedShows])
+
+  useEffect(() => {
+    if (!('caches' in window)) return
+    caches.open(downloadCacheName).then(async (cache) => {
+      const retained = []
+      for (const episode of downloadedEpisodes) {
+        const source = playbackUrl(episode)
+        if (source && await cache.match(source)) retained.push(episode)
+      }
+      if (retained.length !== downloadedEpisodes.length) setDownloadedEpisodes(retained)
+    }).catch(() => undefined)
+  // Intentionally reconcile once at startup; the cache is updated directly by downloads.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     if (!toast) return
@@ -106,12 +128,30 @@ function App() {
     const previousAudio = audioRef.current
     previousAudio?.pause()
     setPlaying(false); setCurrentTime(0); setAudioDuration(0)
-    const source = activeEpisode ? playbackUrl(activeEpisode) : undefined
+    const episode = activeEpisode
+    const source = episode ? playbackUrl(episode) : undefined
     if (!source) { audioRef.current = null; return }
     const audio = new Audio(source)
     audio.preload = 'metadata'
-    audio.addEventListener('loadedmetadata', () => setAudioDuration(audio.duration))
-    audio.addEventListener('timeupdate', () => setCurrentTime(audio.currentTime))
+    let lastPersisted = 0
+    audio.addEventListener('loadedmetadata', () => {
+      setAudioDuration(audio.duration)
+      const resume = pendingResumeRef.current
+      if (resume && resume.id === episode?.id && resume.position > 0 && resume.position < audio.duration) {
+        audio.currentTime = resume.position
+        setCurrentTime(resume.position)
+      }
+      pendingResumeRef.current = null
+    })
+    audio.addEventListener('timeupdate', () => {
+      setCurrentTime(audio.currentTime)
+      if (Math.abs(audio.currentTime - lastPersisted) >= 5) {
+        lastPersisted = audio.currentTime
+        localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: audio.currentTime, updatedAt: Date.now() }))
+      }
+    })
+    audio.addEventListener('play', () => setPlaying(true))
+    audio.addEventListener('pause', () => setPlaying(false))
     audio.addEventListener('ended', () => setPlaying(false))
     audio.addEventListener('error', () => {
       setPlaying(false)
@@ -120,6 +160,28 @@ function App() {
     audioRef.current = audio
     return () => audio.pause()
   }, [activeEpisode])
+
+  useEffect(() => {
+    if (!activeEpisode || !('mediaSession' in navigator)) return
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: activeEpisode.title,
+      artist: activeEpisode.author,
+      album: activeEpisode.show,
+      artwork: activeEpisode.artwork ? [{ src: activeEpisode.artwork, sizes: '600x600', type: 'image/jpeg' }] : [],
+    })
+    navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'
+    if (audioDuration && Number.isFinite(audioDuration)) {
+      try { navigator.mediaSession.setPositionState({ duration: audioDuration, position: Math.min(currentTime, audioDuration) }) } catch { /* Unsupported media session detail. */ }
+    }
+    const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler) => {
+      try { navigator.mediaSession.setActionHandler(action, handler) } catch { /* Unsupported action. */ }
+    }
+    setHandler('play', () => { void audioRef.current?.play() })
+    setHandler('pause', () => audioRef.current?.pause())
+    setHandler('seekbackward', (details) => seekTo(Math.max(0, (audioRef.current?.currentTime ?? 0) - (details.seekOffset ?? 15))))
+    setHandler('seekforward', (details) => seekTo(Math.min(audioRef.current?.duration ?? 0, (audioRef.current?.currentTime ?? 0) + (details.seekOffset ?? 30))))
+    setHandler('seekto', (details) => details.seekTime !== undefined && seekTo(details.seekTime))
+  }, [activeEpisode, playing, currentTime, audioDuration])
 
   const selectEpisode = (episode: Episode) => {
     setActiveEpisode(episode)
@@ -137,6 +199,7 @@ function App() {
     }
     setDownloading((items) => [...items, episode.id])
     try {
+      void navigator.storage?.persist?.()
       const response = await fetch(source)
       if (!response.ok) throw new Error('Unable to fetch audio')
       await caches.open(downloadCacheName).then((cache) => cache.put(source, response.clone()))
@@ -160,6 +223,7 @@ function App() {
   const seekTo = (time: number) => {
     if (audioRef.current) audioRef.current.currentTime = time
     setCurrentTime(time)
+    if (activeEpisode) localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode: activeEpisode, position: time, updatedAt: Date.now() }))
   }
   const toggleFollowShow = (show: PodcastShow) => {
     const isFollowed = followedShows.some((item) => item.id === show.id)
@@ -205,7 +269,7 @@ function App() {
         <div className="avatar small">JT</div>
       </header>
 
-      {tab === 'Home' && <HomeView shows={followedShows} onSelect={(show) => { setTab('Library'); setToast(`Loading ${show.name} in your timeline`) }} />}
+      {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" timeline />}
       {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage}/>}
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/>}
@@ -221,9 +285,9 @@ function App() {
   </main>
 }
 
-function HomeView({ shows, onSelect }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void }) {
+function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void; onUnfollow: (show: PodcastShow) => void }) {
   if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Find your first show</h1><p>Use search to follow podcasts. Their latest episodes will appear in your Timeline.</p></div>
-  return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <button className="show-card" onClick={() => onSelect(show)} key={show.id}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button>)}</div></div>
+  return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <div className="show-card" key={show.id}><button className="show-card-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
 function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, timeline, storageUsage }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; storageUsage?: { usage: number; quota: number } }) {
