@@ -16,8 +16,10 @@ export async function onRequestGet({ request }) {
   }
 
   try {
-    const catalogResponse = await fetch(appleLookup(showId))
-    if (!catalogResponse.ok) return error('The podcast catalog is unavailable.', 502)
+    const catalogResponse = await fetch(appleLookup(showId), {
+      headers: { accept: 'application/json', 'user-agent': 'Podflow/1.0 podcast player' },
+    })
+    if (!catalogResponse.ok) return error(`The podcast catalog is unavailable (${catalogResponse.status}).`, 502)
     const catalog = await catalogResponse.json()
     const episode = catalog.results?.find((item) => Number(item.trackId) === episodeId)
     if (!episode?.episodeUrl) return error('This episode is no longer available from its publisher.', 404)
