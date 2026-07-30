@@ -5,7 +5,7 @@ import { VitePWA } from 'vite-plugin-pwa'
 export default defineConfig({
   plugins: [
     react(),
-    VitePWA({
+    ...(process.env.STORYBOOK ? [] : [VitePWA({
       registerType: 'autoUpdate',
       manifest: {
         name: 'Podflow — intelligent podcasts',
@@ -24,6 +24,6 @@ export default defineConfig({
         navigateFallback: '/index.html',
         globPatterns: ['**/*.{js,css,html,svg,png,ico}']
       }
-    })
+    })])
   ]
 })
