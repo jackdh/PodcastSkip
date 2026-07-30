@@ -2,7 +2,7 @@
 
 ## Cursor Cloud specific instructions
 
-Podflow is a React 19 + Vite PWA (package name `podcastskip`) deployed through Cloudflare Pages. `functions/api/audio.js` is a Pages Function that resolves a selected Apple Podcasts episode by its trusted show/episode IDs, then streams publisher audio through the same origin. This allows consistent playback and Cache Storage downloads; it is intentionally not a general-purpose URL proxy. The app queries the public Apple Podcasts Search API directly for catalog metadata; the transcript and ad-detection content remains a demonstration. Settings (ad-skip toggle, OpenRouter model/key) persist to `localStorage` only — the OpenRouter integration is not wired to any network call yet.
+Podflow is a React 19 + Vite PWA (package name `podcastskip`) deployed through Cloudflare Pages. `functions/api/audio.js` is a Pages Function that streams a selected publisher audio URL through the same origin. It accepts only public HTTPS URLs and audio/octet-stream responses, then supports range requests for playback and Cache Storage downloads. The app queries the public Apple Podcasts Search API directly for catalog metadata; the transcript and ad-detection content remains a demonstration. Settings (ad-skip toggle, OpenRouter model/key) persist to `localStorage` only — the OpenRouter integration is not wired to any network call yet.
 
 Commands are defined in `package.json` and documented in `README.md`:
 - Dev server: `npm run dev` (Vite on `http://localhost:5173`).

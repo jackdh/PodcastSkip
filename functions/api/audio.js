@@ -1,6 +1,3 @@
-const appleLookup = (showId) =>
-  `https://itunes.apple.com/lookup?id=${encodeURIComponent(showId)}&entity=podcastEpisode&limit=200`
-
 const error = (message, status = 400) =>
   new Response(JSON.stringify({ error: message }), {
     status,
@@ -9,26 +6,30 @@ const error = (message, status = 400) =>
 
 export async function onRequestGet({ request }) {
   const url = new URL(request.url)
-  const showId = Number(url.searchParams.get('showId'))
-  const episodeId = Number(url.searchParams.get('episodeId'))
-  if (!Number.isSafeInteger(showId) || !Number.isSafeInteger(episodeId)) {
-    return error('A valid show and episode are required.')
+  const source = url.searchParams.get('source')
+  if (!source) return error('An audio source is required.')
+
+  let upstreamUrl
+  try {
+    upstreamUrl = new URL(source)
+  } catch {
+    return error('The audio source is invalid.')
+  }
+  const blockedHost = /(^localhost$|\.local$|^127\.|^0\.0\.0\.0$|^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[0-1])\.)/
+  if (upstreamUrl.protocol !== 'https:' || upstreamUrl.username || upstreamUrl.password || blockedHost.test(upstreamUrl.hostname)) {
+    return error('Only public HTTPS podcast audio is supported.')
   }
 
   try {
-    const catalogResponse = await fetch(appleLookup(showId), {
-      headers: { accept: 'application/json', 'user-agent': 'Podflow/1.0 podcast player' },
-    })
-    if (!catalogResponse.ok) return error(`The podcast catalog is unavailable (${catalogResponse.status}).`, 502)
-    const catalog = await catalogResponse.json()
-    const episode = catalog.results?.find((item) => Number(item.trackId) === episodeId)
-    if (!episode?.episodeUrl) return error('This episode is no longer available from its publisher.', 404)
-
     const upstreamHeaders = new Headers()
     const range = request.headers.get('range')
     if (range) upstreamHeaders.set('range', range)
-    const upstream = await fetch(episode.episodeUrl, { headers: upstreamHeaders, redirect: 'follow' })
+    const upstream = await fetch(upstreamUrl, { headers: upstreamHeaders, redirect: 'follow' })
     if (!upstream.ok && upstream.status !== 206) return error('The publisher could not provide this audio.', 502)
+    const contentType = upstream.headers.get('content-type') ?? ''
+    if (!contentType.startsWith('audio/') && !contentType.includes('octet-stream')) {
+      return error('The publisher did not provide an audio file.', 415)
+    }
 
     const headers = new Headers()
     for (const header of ['accept-ranges', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
