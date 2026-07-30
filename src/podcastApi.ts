@@ -11,6 +11,7 @@ export type Episode = {
   artwork?: string
   audioUrl?: string
   downloadBytes?: number
+  description?: string
 }
 
 export type PodcastShow = {
@@ -33,6 +34,7 @@ type ItunesResult = {
   artworkUrl600?: string
   artworkUrl100?: string
   episodeUrl?: string
+  description?: string
   primaryGenreName?: string
   genres?: string[]
 }
@@ -67,6 +69,7 @@ const episodeFromResult = (result: ItunesResult): Episode => ({
   duration: formatDuration(result.trackTimeMillis),
   artwork: result.artworkUrl600 ?? result.artworkUrl100,
   audioUrl: result.episodeUrl,
+  description: result.description,
 })
 
 export const playbackUrl = (episode: Episode) => {
