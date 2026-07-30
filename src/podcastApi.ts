@@ -6,6 +6,7 @@ export type Episode = {
   author: string
   title: string
   date: string
+  publishedAt?: string
   duration: string
   artwork?: string
   audioUrl?: string
@@ -62,6 +63,7 @@ const episodeFromResult = (result: ItunesResult): Episode => ({
   author: result.artistName ?? 'Unknown creator',
   title: result.trackName ?? 'Untitled episode',
   date: formatDate(result.releaseDate),
+  publishedAt: result.releaseDate,
   duration: formatDuration(result.trackTimeMillis),
   artwork: result.artworkUrl600 ?? result.artworkUrl100,
   audioUrl: result.episodeUrl,

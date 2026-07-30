@@ -15,11 +15,13 @@ function Art({ artwork, label, large = false }: { artwork?: string; label: strin
 
 function App() {
   const [tab, setTab] = useState<Tab>('Home')
-  const [featuredEpisodes, setFeaturedEpisodes] = useState<Episode[]>([])
-  const [libraryEpisodes, setLibraryEpisodes] = useState<Episode[]>([])
+  const [timelineEpisodes, setTimelineEpisodes] = useState<Episode[]>([])
   const [activeEpisode, setActiveEpisode] = useState<Episode | null>(null)
   const [playing, setPlaying] = useState(false)
-  const [followed, setFollowed] = useState(true)
+  const [followedShows, setFollowedShows] = useState<PodcastShow[]>(() => {
+    try { return JSON.parse(localStorage.getItem('podflow-followed-shows') ?? '[]') as PodcastShow[] }
+    catch { return [] }
+  })
   const [downloadedEpisodes, setDownloadedEpisodes] = useState<Episode[]>(() => {
     try { return JSON.parse(localStorage.getItem('podflow-downloads') ?? '[]') as Episode[] }
     catch { return [] }
@@ -60,6 +62,23 @@ function App() {
   }, [downloadedEpisodes])
 
   useEffect(() => {
+    localStorage.setItem('podflow-followed-shows', JSON.stringify(followedShows))
+    let cancelled = false
+    if (!followedShows.length) {
+      setTimelineEpisodes([])
+      return
+    }
+    Promise.all(followedShows.map((show) => getShowEpisodes(show.id).catch(() => []))).then((episodeLists) => {
+      if (!cancelled) {
+        setTimelineEpisodes(episodeLists.flat().sort((a, b) =>
+          new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
+        ))
+      }
+    })
+    return () => { cancelled = true }
+  }, [followedShows])
+
+  useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 4200)
     return () => window.clearTimeout(timer)
@@ -84,18 +103,6 @@ function App() {
   }, [search])
 
   useEffect(() => {
-    let cancelled = false
-    searchCatalog('Radiolab').then(({ episodes }) => {
-      if (!cancelled) {
-        setFeaturedEpisodes(episodes)
-        setLibraryEpisodes(episodes)
-        setActiveEpisode(episodes[0] ?? null)
-      }
-    }).catch(() => setToast('Could not load featured episodes. Search for a show to begin.'))
-    return () => { cancelled = true }
-  }, [])
-
-  useEffect(() => {
     const previousAudio = audioRef.current
     previousAudio?.pause()
     setPlaying(false); setCurrentTime(0); setAudioDuration(0)
@@ -115,8 +122,7 @@ function App() {
   }, [activeEpisode])
 
   const selectEpisode = (episode: Episode) => {
-    setActiveEpisode(episode); setTab('Home')
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    setActiveEpisode(episode)
   }
   const downloadEpisode = async (episode: Episode) => {
     const source = playbackUrl(episode)
@@ -155,14 +161,11 @@ function App() {
     if (audioRef.current) audioRef.current.currentTime = time
     setCurrentTime(time)
   }
-  const openShow = async (show: PodcastShow) => {
-    setSearch(''); setSearchStatus('loading'); setTab('Library')
-    try {
-      const showEpisodes = await getShowEpisodes(show.id)
-      setLibraryEpisodes(showEpisodes)
-      if (showEpisodes[0]) setActiveEpisode(showEpisodes[0])
-    } catch { setToast('Could not load that show. Please try another one.') }
-    finally { setSearchStatus('idle') }
+  const toggleFollowShow = (show: PodcastShow) => {
+    const isFollowed = followedShows.some((item) => item.id === show.id)
+    setFollowedShows((shows) => isFollowed ? shows.filter((item) => item.id !== show.id) : [...shows, show])
+    setSearch('')
+    setToast(isFollowed ? `Unfollowed ${show.name}` : `Following ${show.name}`)
   }
   const saveSettings = () => {
     localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey }))
@@ -171,7 +174,6 @@ function App() {
   }
 
   const downloaded = downloadedEpisodes.map((episode) => episode.id)
-  const visibleEpisodes = search.trim().length >= 2 ? searchResults.episodes : libraryEpisodes
 
   return <main>
     <aside className="sidebar">
@@ -179,7 +181,7 @@ function App() {
       <nav>{([
         ['Home', Home], ['Library', Library], ['Downloads', Download]
       ] as const).map(([name, Icon]) => <button key={name} className={tab === name ? 'nav-active' : ''} onClick={() => setTab(name)}>
-        <Icon size={19}/>{name}
+        <Icon size={19}/>{name === 'Library' ? 'Timeline' : name}
       </button>)}</nav>
       <div className="sidebar-bottom">
         <button onClick={() => setSettingsOpen(true)}><Settings size={19}/>Settings</button>
@@ -194,7 +196,7 @@ function App() {
           {search.trim().length >= 2 && <div className="search-results">
             {searchStatus === 'loading' && <p className="search-state">Searching the podcast catalog…</p>}
             {searchStatus === 'error' && <p className="search-state">Search is unavailable. Please try again.</p>}
-            {searchStatus === 'idle' && <>{searchResults.shows.length > 0 && <><span className="result-label">SHOWS</span>{searchResults.shows.map(show => <button className="show-result" key={show.id} onClick={() => openShow(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}{show.genres[0] ? ` · ${show.genres[0]}` : ''}</small></span></button>)}</>}
+            {searchStatus === 'idle' && <>{searchResults.shows.length > 0 && <><span className="result-label">SHOWS · TAP TO FOLLOW</span>{searchResults.shows.map(show => <button className="show-result" key={show.id} onClick={() => toggleFollowShow(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}{show.genres[0] ? ` · ${show.genres[0]}` : ''}</small></span><strong className={followedShows.some(item => item.id === show.id) ? 'following-mark' : ''}>{followedShows.some(item => item.id === show.id) ? 'Following' : <Plus size={16}/>}</strong></button>)}</>}
             {searchResults.episodes.length > 0 && <><span className="result-label">EPISODES</span>{searchResults.episodes.slice(0, 4).map(episode => <button className="show-result" key={episode.id} onClick={() => { selectEpisode(episode); setSearch('') }}><Art artwork={episode.artwork} label={episode.show}/><span><b>{episode.title}</b><small>{episode.show} · {episode.duration}</small></span></button>)}</>}
             {!searchResults.shows.length && !searchResults.episodes.length && <p className="search-state">No playable podcasts found.</p>}</>}
           </div>}
@@ -203,8 +205,8 @@ function App() {
         <div className="avatar small">JT</div>
       </header>
 
-      {tab === 'Home' && <HomeView episode={activeEpisode} playing={playing} onPlay={togglePlayback} followed={followed} onFollow={() => setFollowed(!followed)} onDownload={() => activeEpisode && downloadEpisode(activeEpisode)} isDownloaded={activeEpisode ? downloaded.includes(activeEpisode.id) : false} featuredEpisodes={featuredEpisodes} onSelect={selectEpisode} downloaded={downloaded} onEpisodeDownload={downloadEpisode} downloading={downloading} currentTime={currentTime} audioDuration={audioDuration} />}
-      {tab === 'Library' && <LibraryView episodes={visibleEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search={search} />}
+      {tab === 'Home' && <HomeView shows={followedShows} onSelect={(show) => { setTab('Library'); setToast(`Loading ${show.name} in your timeline`) }} />}
+      {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" timeline />}
       {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage}/>}
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/>}
     </section>
@@ -213,33 +215,21 @@ function App() {
     {playerOpen && activeEpisode && <FullPlayer episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} onClose={() => setPlayerOpen(false)} />}
     <div className="mobile-nav">{([
       ['Home', Home], ['Library', Library], ['Downloads', Download], ['Settings', Settings]
-    ] as const).map(([name, Icon]) => <button key={name} onClick={() => name === 'Settings' ? setSettingsOpen(true) : setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name}</span></button>)}</div>
+    ] as const).map(([name, Icon]) => <button key={name} onClick={() => name === 'Settings' ? setSettingsOpen(true) : setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
     {settingsOpen && <div className="modal-backdrop"><div className="settings-modal"><button className="close" onClick={() => setSettingsOpen(false)}><X/></button><SettingsPanel apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/></div></div>}
     {toast && <div className="toast"><Sparkles size={17}/>{toast}</div>}
   </main>
 }
 
-function HomeView({ episode, playing, onPlay, followed, onFollow, onDownload, isDownloaded, featuredEpisodes, onSelect, downloaded, onEpisodeDownload, downloading, currentTime, audioDuration }: {
-  episode: Episode | null; playing: boolean; onPlay: () => void; followed: boolean; onFollow: () => void; onDownload: () => void; isDownloaded: boolean; featuredEpisodes: Episode[]; onSelect: (episode: Episode) => void; downloaded: string[]; onEpisodeDownload: (episode: Episode) => void; downloading: string[]; currentTime: number; audioDuration: number
-}) {
-  if (!episode) return <div className="page loading-home"><Sparkles size={26}/><h1>Loading live podcasts…</h1><p>Connecting to the Apple Podcasts catalog.</p></div>
-  const listened = audioDuration ? formatTime(currentTime) : 'Not started'
-  return <div className="page">
-    <div className="eyebrow">NOW PLAYING</div>
-    <div className="hero">
-      <Art artwork={episode.artwork} label={episode.show} large />
-      <div className="hero-copy"><span className="show-name">{episode.show}</span><h1>{episode.title}</h1><p>{episode.author} · {episode.date} · {episode.duration}</p><div className="hero-actions"><button className="play-button" onClick={onPlay}>{playing ? <Pause fill="currentColor"/> : <Play fill="currentColor"/>}{playing ? 'Pause' : 'Play episode'}</button><button className={`round-button ${isDownloaded ? 'downloaded-button' : ''}`} onClick={onDownload} title="Save in your library"><Download size={20}/></button><button className="round-button" onClick={() => navigator.share?.({ title: episode.title, text: `${episode.title} — ${episode.show}` })}><Share2 size={19}/></button></div></div>
-      <button className={`follow ${followed ? 'following' : ''}`} onClick={onFollow}>{followed ? 'Following' : <><Plus size={16}/>Follow</>}</button>
-    </div>
-    <div className="stats"><div><strong>{listened}</strong><span>of {audioDuration ? formatTime(audioDuration) : episode.duration} played</span></div><div><strong>—</strong><span>ads skipped this episode</span></div><div><strong>—</strong><span>total time reclaimed</span></div></div>
-    <div className="section-heading release-heading"><div><h2>Fresh from the catalog</h2><p>Live episodes from Apple Podcasts</p></div><button className="text-button">Browse <ChevronDown size={16}/></button></div>
-    <EpisodeList episodes={featuredEpisodes.slice(1, 4)} onSelect={onSelect} downloaded={downloaded} onDownload={onEpisodeDownload} downloading={downloading} compact/>
-  </div>
+function HomeView({ shows, onSelect }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void }) {
+  if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Find your first show</h1><p>Use search to follow podcasts. Their latest episodes will appear in your Timeline.</p></div>
+  return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <button className="show-card" onClick={() => onSelect(show)} key={show.id}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button>)}</div></div>
 }
 
-function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, storageUsage }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; storageUsage?: { usage: number; quota: number } }) {
+function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, timeline, storageUsage }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; storageUsage?: { usage: number; quota: number } }) {
   const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? 0), 0)
-  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div></div>}<EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading}/></div>
+  const emptyText = timeline ? 'Follow podcasts using search to build your episode Timeline.' : 'Save episodes to listen without an internet connection.'
+  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div></div>}{episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
 }
 
 function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean }) {
