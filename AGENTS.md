@@ -2,7 +2,7 @@
 
 ## Cursor Cloud specific instructions
 
-Podflow is a single-service, frontend-only React 19 + Vite PWA (package name `podcastskip`). There is no backend, database, or Docker; all podcast/transcript data is mock data hardcoded in `src/App.tsx`. Settings (ad-skip toggle, OpenRouter model/key) persist to `localStorage` only — the OpenRouter integration is not wired to any network call yet.
+Podflow is a single-service, frontend-only React 19 + Vite PWA (package name `podcastskip`). There is no backend, database, or Docker. The app queries the public Apple Podcasts Search API directly for podcast shows and episode metadata/audio URLs; the transcript and ad-detection content remains a demonstration. Settings (ad-skip toggle, OpenRouter model/key) persist to `localStorage` only — the OpenRouter integration is not wired to any network call yet.
 
 Commands are defined in `package.json` and documented in `README.md`:
 - Dev server: `npm run dev` (Vite on `http://localhost:5173`).
