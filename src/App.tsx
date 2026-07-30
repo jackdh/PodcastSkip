@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Bell, ChevronDown, Clock3, Download, Headphones, Home,
   Library, MoreHorizontal, Pause, Play, Plus, RotateCcw, RotateCw, Search,
-  Settings, Share2, SkipForward, Sparkles, WandSparkles, X
+  Settings, Sparkles, WandSparkles
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
 
@@ -36,7 +36,6 @@ function App() {
   const [toast, setToast] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
-  const [playerOpen, setPlayerOpen] = useState(false)
   const [storageUsage, setStorageUsage] = useState({ usage: 0, quota: 0 })
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
@@ -274,8 +273,7 @@ function App() {
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/>}
     </section>
 
-    <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} onOpen={() => setPlayerOpen(true)} />
-    {playerOpen && activeEpisode && <FullPlayer episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} onClose={() => setPlayerOpen(false)} />}
+    <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} />
     <div className="mobile-nav">{([
       ['Home', Home], ['Library', Library], ['Downloads', Download], ['Settings', Settings]
     ] as const).map(([name, Icon]) => <button key={name} onClick={() => setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
@@ -303,13 +301,27 @@ function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, 
   })}</div>
 }
 
-function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, onOpen }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; onOpen: () => void }) {
+function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void }) {
+  const [expanded, setExpanded] = useState(false)
   if (!episode) return null
-  return <div className="player-bar"><button className="now" onClick={onOpen} aria-label="Open full player"><Art artwork={episode.artwork} label={episode.show}/><div><b>{episode.title}</b><span>{episode.show}</span></div></button><div className="controls"><button onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><SkipForward className="flip" size={19}/></button><button className="player-play" onClick={onPlay}>{playing ? <Pause fill="currentColor" size={18}/> : <Play fill="currentColor" size={18}/>}</button><button onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><SkipForward size={19}/></button></div><div className="track"><span>{formatTime(currentTime)}</span><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{duration ? formatTime(duration) : episode.duration}</span></div><button className="speed">1×</button></div>
-}
-
-function FullPlayer({ episode, playing, onPlay, currentTime, duration, onSeek, onClose }: { episode: Episode; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; onClose: () => void }) {
-  return <div className="full-player-backdrop" onClick={onClose}><section className="full-player" role="dialog" aria-modal="true" aria-label="Player controls" onClick={event => event.stopPropagation()}><button className="close full-close" onClick={onClose} aria-label="Close player"><X size={20}/></button><span className="show-name">{episode.show}</span><h2>{episode.title}</h2><div className="full-track"><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{formatTime(currentTime)}</span><span>{duration ? formatTime(duration) : episode.duration}</span></div><div className="full-controls"><button className="skip-control" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><RotateCcw size={34} strokeWidth={1.75}/><span>15</span></button><button className="full-play" onClick={onPlay}>{playing ? <Pause fill="currentColor" size={28}/> : <Play fill="currentColor" size={28}/>}</button><button className="skip-control" onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><RotateCw size={34} strokeWidth={1.75}/><span>30</span></button></div></section></div>
+  return <div className={`player-bar ${expanded ? 'expanded' : ''}`}>
+    <div className="player-bar-main">
+      <button className="now" onClick={() => setExpanded(open => !open)} aria-expanded={expanded} aria-label={expanded ? 'Collapse player' : 'Expand player'}>
+        <Art artwork={episode.artwork} label={episode.show}/>
+        <div><b>{episode.title}</b><span>{episode.show}</span></div>
+        <ChevronDown className={expanded ? 'chevron-up' : ''} size={16}/>
+      </button>
+      {!expanded && <button className="player-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause fill="currentColor" size={18}/> : <Play fill="currentColor" size={18}/>}</button>}
+    </div>
+    {expanded && <div className="player-bar-body">
+      <div className="track"><span>{formatTime(currentTime)}</span><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{duration ? formatTime(duration) : episode.duration}</span></div>
+      <div className="controls">
+        <button className="skip-control" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><RotateCcw size={28} strokeWidth={1.75}/><span>15</span></button>
+        <button className="player-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause fill="currentColor" size={22}/> : <Play fill="currentColor" size={22}/>}</button>
+        <button className="skip-control" onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><RotateCw size={28} strokeWidth={1.75}/><span>30</span></button>
+      </div>
+    </div>}
+  </div>
 }
 
 function formatTime(seconds: number) {
