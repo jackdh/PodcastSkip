@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Bell, ChevronDown, Clock3, Download, Headphones, Home,
-  Library, MoreHorizontal, Pause, Play, Plus, Search,
+  Library, MoreHorizontal, Pause, Play, Plus, RotateCcw, RotateCw, Search,
   Settings, Share2, SkipForward, Sparkles, WandSparkles, X
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
@@ -31,7 +31,6 @@ function App() {
   const [searchResults, setSearchResults] = useState<{ shows: PodcastShow[]; episodes: Episode[] }>({ shows: [], episodes: [] })
   const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [skipAds, setSkipAds] = useState(true)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('google/gemini-2.5-flash')
   const [toast, setToast] = useState('')
@@ -40,6 +39,7 @@ function App() {
   const [playerOpen, setPlayerOpen] = useState(false)
   const [storageUsage, setStorageUsage] = useState({ usage: 0, quota: 0 })
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
   const refreshStorageUsage = async () => {
     if (!navigator.storage?.estimate) return
     const { usage = 0, quota = 0 } = await navigator.storage.estimate()
@@ -54,6 +54,13 @@ function App() {
       setModel(parsed.model ?? 'google/gemini-2.5-flash')
       setApiKey(parsed.apiKey ?? '')
     }
+    try {
+      const nowPlaying = JSON.parse(localStorage.getItem('podflow-now-playing') ?? 'null') as { episode?: Episode; position?: number } | null
+      if (nowPlaying?.episode?.audioUrl) {
+        pendingResumeRef.current = { id: nowPlaying.episode.id, position: nowPlaying.position ?? 0 }
+        setActiveEpisode(nowPlaying.episode)
+      }
+    } catch { /* Ignore malformed local playback state. */ }
   }, [])
 
   useEffect(() => {
@@ -77,6 +84,20 @@ function App() {
     })
     return () => { cancelled = true }
   }, [followedShows])
+
+  useEffect(() => {
+    if (!('caches' in window)) return
+    caches.open(downloadCacheName).then(async (cache) => {
+      const retained = []
+      for (const episode of downloadedEpisodes) {
+        const source = playbackUrl(episode)
+        if (source && await cache.match(source)) retained.push(episode)
+      }
+      if (retained.length !== downloadedEpisodes.length) setDownloadedEpisodes(retained)
+    }).catch(() => undefined)
+  // Intentionally reconcile once at startup; the cache is updated directly by downloads.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     if (!toast) return
@@ -106,12 +127,30 @@ function App() {
     const previousAudio = audioRef.current
     previousAudio?.pause()
     setPlaying(false); setCurrentTime(0); setAudioDuration(0)
-    const source = activeEpisode ? playbackUrl(activeEpisode) : undefined
+    const episode = activeEpisode
+    const source = episode ? playbackUrl(episode) : undefined
     if (!source) { audioRef.current = null; return }
     const audio = new Audio(source)
     audio.preload = 'metadata'
-    audio.addEventListener('loadedmetadata', () => setAudioDuration(audio.duration))
-    audio.addEventListener('timeupdate', () => setCurrentTime(audio.currentTime))
+    let lastPersisted = 0
+    audio.addEventListener('loadedmetadata', () => {
+      setAudioDuration(audio.duration)
+      const resume = pendingResumeRef.current
+      if (resume && resume.id === episode?.id && resume.position > 0 && resume.position < audio.duration) {
+        audio.currentTime = resume.position
+        setCurrentTime(resume.position)
+      }
+      pendingResumeRef.current = null
+    })
+    audio.addEventListener('timeupdate', () => {
+      setCurrentTime(audio.currentTime)
+      if (Math.abs(audio.currentTime - lastPersisted) >= 5) {
+        lastPersisted = audio.currentTime
+        localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: audio.currentTime, updatedAt: Date.now() }))
+      }
+    })
+    audio.addEventListener('play', () => setPlaying(true))
+    audio.addEventListener('pause', () => setPlaying(false))
     audio.addEventListener('ended', () => setPlaying(false))
     audio.addEventListener('error', () => {
       setPlaying(false)
@@ -120,6 +159,28 @@ function App() {
     audioRef.current = audio
     return () => audio.pause()
   }, [activeEpisode])
+
+  useEffect(() => {
+    if (!activeEpisode || !('mediaSession' in navigator)) return
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: activeEpisode.title,
+      artist: activeEpisode.author,
+      album: activeEpisode.show,
+      artwork: activeEpisode.artwork ? [{ src: activeEpisode.artwork, sizes: '600x600', type: 'image/jpeg' }] : [],
+    })
+    navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'
+    if (audioDuration && Number.isFinite(audioDuration)) {
+      try { navigator.mediaSession.setPositionState({ duration: audioDuration, position: Math.min(currentTime, audioDuration) }) } catch { /* Unsupported media session detail. */ }
+    }
+    const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler) => {
+      try { navigator.mediaSession.setActionHandler(action, handler) } catch { /* Unsupported action. */ }
+    }
+    setHandler('play', () => { void audioRef.current?.play() })
+    setHandler('pause', () => audioRef.current?.pause())
+    setHandler('seekbackward', (details) => seekTo(Math.max(0, (audioRef.current?.currentTime ?? 0) - (details.seekOffset ?? 15))))
+    setHandler('seekforward', (details) => seekTo(Math.min(audioRef.current?.duration ?? 0, (audioRef.current?.currentTime ?? 0) + (details.seekOffset ?? 30))))
+    setHandler('seekto', (details) => details.seekTime !== undefined && seekTo(details.seekTime))
+  }, [activeEpisode, playing, currentTime, audioDuration])
 
   const selectEpisode = (episode: Episode) => {
     setActiveEpisode(episode)
@@ -137,6 +198,7 @@ function App() {
     }
     setDownloading((items) => [...items, episode.id])
     try {
+      void navigator.storage?.persist?.()
       const response = await fetch(source)
       if (!response.ok) throw new Error('Unable to fetch audio')
       await caches.open(downloadCacheName).then((cache) => cache.put(source, response.clone()))
@@ -160,6 +222,7 @@ function App() {
   const seekTo = (time: number) => {
     if (audioRef.current) audioRef.current.currentTime = time
     setCurrentTime(time)
+    if (activeEpisode) localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode: activeEpisode, position: time, updatedAt: Date.now() }))
   }
   const toggleFollowShow = (show: PodcastShow) => {
     const isFollowed = followedShows.some((item) => item.id === show.id)
@@ -169,7 +232,7 @@ function App() {
   }
   const saveSettings = () => {
     localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey }))
-    setSettingsOpen(false); setToast('Ad skip settings saved')
+    setToast('Ad skip settings saved')
     setTimeout(() => setToast(''), 2300)
   }
 
@@ -184,7 +247,7 @@ function App() {
         <Icon size={19}/>{name === 'Library' ? 'Timeline' : name}
       </button>)}</nav>
       <div className="sidebar-bottom">
-        <button onClick={() => setSettingsOpen(true)}><Settings size={19}/>Settings</button>
+        <button className={tab === 'Settings' ? 'nav-active' : ''} onClick={() => setTab('Settings')}><Settings size={19}/>Settings</button>
         <div className="profile"><div className="avatar">JT</div><div><b>Jamie Taylor</b><small>Free plan</small></div><MoreHorizontal size={18}/></div>
       </div>
     </aside>
@@ -205,7 +268,7 @@ function App() {
         <div className="avatar small">JT</div>
       </header>
 
-      {tab === 'Home' && <HomeView shows={followedShows} onSelect={(show) => { setTab('Library'); setToast(`Loading ${show.name} in your timeline`) }} />}
+      {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" timeline />}
       {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage}/>}
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/>}
@@ -215,26 +278,29 @@ function App() {
     {playerOpen && activeEpisode && <FullPlayer episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} onClose={() => setPlayerOpen(false)} />}
     <div className="mobile-nav">{([
       ['Home', Home], ['Library', Library], ['Downloads', Download], ['Settings', Settings]
-    ] as const).map(([name, Icon]) => <button key={name} onClick={() => name === 'Settings' ? setSettingsOpen(true) : setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
-    {settingsOpen && <div className="modal-backdrop"><div className="settings-modal"><button className="close" onClick={() => setSettingsOpen(false)}><X/></button><SettingsPanel apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/></div></div>}
+    ] as const).map(([name, Icon]) => <button key={name} onClick={() => setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
     {toast && <div className="toast"><Sparkles size={17}/>{toast}</div>}
   </main>
 }
 
-function HomeView({ shows, onSelect }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void }) {
+function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void; onUnfollow: (show: PodcastShow) => void }) {
   if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Find your first show</h1><p>Use search to follow podcasts. Their latest episodes will appear in your Timeline.</p></div>
-  return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <button className="show-card" onClick={() => onSelect(show)} key={show.id}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button>)}</div></div>
+  return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <div className="show-card" key={show.id}><button className="show-card-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
 function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, timeline, storageUsage }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; storageUsage?: { usage: number; quota: number } }) {
   const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? 0), 0)
   const emptyText = timeline ? 'Follow podcasts using search to build your episode Timeline.' : 'Save episodes to listen without an internet connection.'
-  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div></div>}{episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
+  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div></div>}{episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading} expandable={timeline}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
 }
 
-function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean }) {
+function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false, expandable = false }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null)
   if (!episodes.length) return <div className="empty"><Download size={30}/><h3>Nothing downloaded yet</h3><p>Save episodes to listen without an internet connection.</p></div>
-  return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => <article className="episode-row" key={e.id} onClick={() => onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{downloaded.includes(e.id) && e.downloadBytes ? ` · ${formatBytes(e.downloadBytes)}` : ''}</p></div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} disabled={downloading.includes(e.id)} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={downloaded.includes(e.id) ? 'Remove download' : 'Download episode'}>{downloading.includes(e.id) ? <Clock3 size={18}/> : <Download size={19}/>}</button><button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button></article>)}</div>
+  return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => {
+    const expanded = expandedId === e.id
+    return <article className={`episode-row ${expanded ? 'expanded' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{downloaded.includes(e.id) && e.downloadBytes ? ` · ${formatBytes(e.downloadBytes)}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>Play episode</button><span>{e.author} · {e.date}</span></div></div>}</div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} disabled={downloading.includes(e.id)} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={downloaded.includes(e.id) ? 'Remove download' : 'Download episode'}>{downloading.includes(e.id) ? <Clock3 size={18}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
+  })}</div>
 }
 
 function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, onOpen }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; onOpen: () => void }) {
@@ -243,7 +309,7 @@ function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, on
 }
 
 function FullPlayer({ episode, playing, onPlay, currentTime, duration, onSeek, onClose }: { episode: Episode; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; onClose: () => void }) {
-  return <div className="full-player-backdrop" onClick={onClose}><section className="full-player" onClick={event => event.stopPropagation()}><button className="close full-close" onClick={onClose}><X/></button><Art artwork={episode.artwork} label={episode.show} large/><span className="show-name">{episode.show}</span><h2>{episode.title}</h2><p>{episode.author}</p><div className="full-track"><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{formatTime(currentTime)}</span><span>{duration ? formatTime(duration) : episode.duration}</span></div><div className="full-controls"><button onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><SkipForward className="flip" size={28}/><small>15</small></button><button className="full-play" onClick={onPlay}>{playing ? <Pause fill="currentColor" size={30}/> : <Play fill="currentColor" size={30}/>}</button><button onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><SkipForward size={28}/><small>30</small></button></div></section></div>
+  return <div className="full-player-backdrop" onClick={onClose}><section className="full-player" role="dialog" aria-modal="true" aria-label="Player controls" onClick={event => event.stopPropagation()}><button className="close full-close" onClick={onClose} aria-label="Close player"><X size={20}/></button><span className="show-name">{episode.show}</span><h2>{episode.title}</h2><div className="full-track"><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{formatTime(currentTime)}</span><span>{duration ? formatTime(duration) : episode.duration}</span></div><div className="full-controls"><button className="skip-control" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><RotateCcw size={34} strokeWidth={1.75}/><span>15</span></button><button className="full-play" onClick={onPlay}>{playing ? <Pause fill="currentColor" size={28}/> : <Play fill="currentColor" size={28}/>}</button><button className="skip-control" onClick={() => onSeek(Math.min(duration, currentTime + 30))} aria-label="Forward 30 seconds"><RotateCw size={34} strokeWidth={1.75}/><span>30</span></button></div></section></div>
 }
 
 function formatTime(seconds: number) {

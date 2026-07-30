@@ -4,6 +4,14 @@ const error = (message, status = 400) =>
     headers: { 'content-type': 'application/json; charset=utf-8' },
   })
 
+const isPublicHttpsUrl = (url) => {
+  const host = url.hostname.toLowerCase()
+  const privateIpv4 = /^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/
+  const privateIpv6 = /^(::1$|::$|fc|fd|fe80:)/i
+  return url.protocol === 'https:' && !url.username && !url.password &&
+    !/(^localhost$|\.local$)/.test(host) && !privateIpv4.test(host) && !privateIpv6.test(host)
+}
+
 export async function onRequestGet({ request }) {
   const url = new URL(request.url)
   const source = url.searchParams.get('source')
@@ -15,8 +23,7 @@ export async function onRequestGet({ request }) {
   } catch {
     return error('The audio source is invalid.')
   }
-  const blockedHost = /(^localhost$|\.local$|^127\.|^0\.0\.0\.0$|^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[0-1])\.)/
-  if (upstreamUrl.protocol !== 'https:' || upstreamUrl.username || upstreamUrl.password || blockedHost.test(upstreamUrl.hostname)) {
+  if (!isPublicHttpsUrl(upstreamUrl)) {
     return error('Only public HTTPS podcast audio is supported.')
   }
 
