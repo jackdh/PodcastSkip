@@ -31,7 +31,6 @@ function App() {
   const [searchResults, setSearchResults] = useState<{ shows: PodcastShow[]; episodes: Episode[] }>({ shows: [], episodes: [] })
   const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [skipAds, setSkipAds] = useState(true)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('google/gemini-2.5-flash')
   const [toast, setToast] = useState('')
@@ -233,7 +232,7 @@ function App() {
   }
   const saveSettings = () => {
     localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey }))
-    setSettingsOpen(false); setToast('Ad skip settings saved')
+    setToast('Ad skip settings saved')
     setTimeout(() => setToast(''), 2300)
   }
 
@@ -248,7 +247,7 @@ function App() {
         <Icon size={19}/>{name === 'Library' ? 'Timeline' : name}
       </button>)}</nav>
       <div className="sidebar-bottom">
-        <button onClick={() => setSettingsOpen(true)}><Settings size={19}/>Settings</button>
+        <button className={tab === 'Settings' ? 'nav-active' : ''} onClick={() => setTab('Settings')}><Settings size={19}/>Settings</button>
         <div className="profile"><div className="avatar">JT</div><div><b>Jamie Taylor</b><small>Free plan</small></div><MoreHorizontal size={18}/></div>
       </div>
     </aside>
@@ -279,8 +278,7 @@ function App() {
     {playerOpen && activeEpisode && <FullPlayer episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} onClose={() => setPlayerOpen(false)} />}
     <div className="mobile-nav">{([
       ['Home', Home], ['Library', Library], ['Downloads', Download], ['Settings', Settings]
-    ] as const).map(([name, Icon]) => <button key={name} onClick={() => name === 'Settings' ? setSettingsOpen(true) : setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
-    {settingsOpen && <div className="modal-backdrop"><div className="settings-modal"><button className="close" onClick={() => setSettingsOpen(false)}><X/></button><SettingsPanel apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/></div></div>}
+    ] as const).map(([name, Icon]) => <button key={name} onClick={() => setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
     {toast && <div className="toast"><Sparkles size={17}/>{toast}</div>}
   </main>
 }
