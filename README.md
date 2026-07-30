@@ -8,6 +8,7 @@ episode transcripts and skips them during playback.
 - Installable PWA for iOS and Android, with a service worker for app-shell offline use.
 - Responsive desktop and mobile podcast listening interface.
 - Live Apple Podcasts catalog search, show episodes, and browser audio playback.
+- Same-origin Pages Function audio streaming and persistent Cache Storage downloads for offline listening.
 - Interactive transcript with clearly marked AI-detected advertisement ranges.
 - Local settings for automatic ad skipping and an OpenRouter API key/model choice.
 - Storybook design lab with desktop and mobile app stories.

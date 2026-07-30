@@ -4,9 +4,10 @@ import {
   Library, ListMusic, MoreHorizontal, Pause, Play, Plus, Search,
   Settings, Share2, SkipForward, Sparkles, WandSparkles, X
 } from 'lucide-react'
-import { getShowEpisodes, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
+import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
+const downloadCacheName = 'podflow-downloads-v1'
 
 const transcript = [
   { time: '00:00', speaker: 'ALEX', text: 'Welcome back to The Knowledge Project. Today, I’m talking with author and investor Maya Chen about building a life around the things that matter.', ad: false },
@@ -27,7 +28,11 @@ function App() {
   const [activeEpisode, setActiveEpisode] = useState<Episode | null>(null)
   const [playing, setPlaying] = useState(false)
   const [followed, setFollowed] = useState(true)
-  const [downloaded, setDownloaded] = useState<string[]>([])
+  const [downloadedEpisodes, setDownloadedEpisodes] = useState<Episode[]>(() => {
+    try { return JSON.parse(localStorage.getItem('podflow-downloads') ?? '[]') as Episode[] }
+    catch { return [] }
+  })
+  const [downloading, setDownloading] = useState<string[]>([])
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<{ shows: PodcastShow[]; episodes: Episode[] }>({ shows: [], episodes: [] })
   const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle')
@@ -49,6 +54,16 @@ function App() {
       setApiKey(parsed.apiKey ?? '')
     }
   }, [])
+
+  useEffect(() => {
+    localStorage.setItem('podflow-downloads', JSON.stringify(downloadedEpisodes))
+  }, [downloadedEpisodes])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(''), 4200)
+    return () => window.clearTimeout(timer)
+  }, [toast])
 
   useEffect(() => {
     let cancelled = false
@@ -84,8 +99,9 @@ function App() {
     const previousAudio = audioRef.current
     previousAudio?.pause()
     setPlaying(false); setCurrentTime(0); setAudioDuration(0)
-    if (!activeEpisode?.audioUrl) { audioRef.current = null; return }
-    const audio = new Audio(activeEpisode.audioUrl)
+    const source = activeEpisode ? playbackUrl(activeEpisode) : undefined
+    if (!source) { audioRef.current = null; return }
+    const audio = new Audio(source)
     audio.preload = 'metadata'
     audio.addEventListener('loadedmetadata', () => setAudioDuration(audio.duration))
     audio.addEventListener('timeupdate', () => setCurrentTime(audio.currentTime))
@@ -102,10 +118,28 @@ function App() {
     setActiveEpisode(episode); setTab('Home')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
-  const toggleDownload = (id: string) => {
-    setDownloaded(items => items.includes(id) ? items.filter(i => i !== id) : [...items, id])
-    setToast(downloaded.includes(id) ? 'Removed from downloads' : 'Saved for offline listening')
-    setTimeout(() => setToast(''), 2300)
+  const downloadEpisode = async (episode: Episode) => {
+    const source = playbackUrl(episode)
+    if (!source || !('caches' in window)) { setToast('Offline downloads are not available in this browser.'); return }
+    const isDownloaded = downloadedEpisodes.some((item) => item.id === episode.id)
+    if (isDownloaded) {
+      await caches.open(downloadCacheName).then((cache) => cache.delete(source))
+      setDownloadedEpisodes((items) => items.filter((item) => item.id !== episode.id))
+      setToast('Removed downloaded episode')
+      return
+    }
+    setDownloading((items) => [...items, episode.id])
+    try {
+      const response = await fetch(source)
+      if (!response.ok) throw new Error('Unable to fetch audio')
+      await caches.open(downloadCacheName).then((cache) => cache.put(source, response.clone()))
+      setDownloadedEpisodes((items) => [...items.filter((item) => item.id !== episode.id), episode])
+      setToast('Downloaded for offline listening')
+    } catch {
+      setToast('This episode could not be downloaded. Please try another publisher.')
+    } finally {
+      setDownloading((items) => items.filter((id) => id !== episode.id))
+    }
   }
   const togglePlayback = async () => {
     const audio = audioRef.current
@@ -133,6 +167,7 @@ function App() {
     setTimeout(() => setToast(''), 2300)
   }
 
+  const downloaded = downloadedEpisodes.map((episode) => episode.id)
   const visibleEpisodes = search.trim().length >= 2 ? searchResults.episodes : libraryEpisodes
 
   return <main>
@@ -165,9 +200,9 @@ function App() {
         <div className="avatar small">JT</div>
       </header>
 
-      {tab === 'Home' && <HomeView episode={activeEpisode} playing={playing} onPlay={togglePlayback} followed={followed} onFollow={() => setFollowed(!followed)} skipAds={skipAds} onSkipAds={() => setSkipAds(!skipAds)} onOpenSettings={() => setSettingsOpen(true)} onDownload={() => activeEpisode && toggleDownload(activeEpisode.id)} isDownloaded={activeEpisode ? downloaded.includes(activeEpisode.id) : false} featuredEpisodes={featuredEpisodes} onSelect={selectEpisode} downloaded={downloaded} onEpisodeDownload={toggleDownload} currentTime={currentTime} audioDuration={audioDuration} />}
-      {tab === 'Library' && <LibraryView episodes={visibleEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={toggleDownload} search={search} />}
-      {tab === 'Downloads' && <LibraryView episodes={libraryEpisodes.filter(e => downloaded.includes(e.id))} onSelect={selectEpisode} downloaded={downloaded} onDownload={toggleDownload} search="" downloads />}
+      {tab === 'Home' && <HomeView episode={activeEpisode} playing={playing} onPlay={togglePlayback} followed={followed} onFollow={() => setFollowed(!followed)} skipAds={skipAds} onSkipAds={() => setSkipAds(!skipAds)} onOpenSettings={() => setSettingsOpen(true)} onDownload={() => activeEpisode && downloadEpisode(activeEpisode)} isDownloaded={activeEpisode ? downloaded.includes(activeEpisode.id) : false} featuredEpisodes={featuredEpisodes} onSelect={selectEpisode} downloaded={downloaded} onEpisodeDownload={downloadEpisode} downloading={downloading} currentTime={currentTime} audioDuration={audioDuration} />}
+      {tab === 'Library' && <LibraryView episodes={visibleEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search={search} />}
+      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads />}
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/>}
     </section>
 
@@ -180,8 +215,8 @@ function App() {
   </main>
 }
 
-function HomeView({ episode, playing, onPlay, followed, onFollow, skipAds, onSkipAds, onOpenSettings, onDownload, isDownloaded, featuredEpisodes, onSelect, downloaded, onEpisodeDownload, currentTime, audioDuration }: {
-  episode: Episode | null; playing: boolean; onPlay: () => void; followed: boolean; onFollow: () => void; skipAds: boolean; onSkipAds: () => void; onOpenSettings: () => void; onDownload: () => void; isDownloaded: boolean; featuredEpisodes: Episode[]; onSelect: (episode: Episode) => void; downloaded: string[]; onEpisodeDownload: (id: string) => void; currentTime: number; audioDuration: number
+function HomeView({ episode, playing, onPlay, followed, onFollow, skipAds, onSkipAds, onOpenSettings, onDownload, isDownloaded, featuredEpisodes, onSelect, downloaded, onEpisodeDownload, downloading, currentTime, audioDuration }: {
+  episode: Episode | null; playing: boolean; onPlay: () => void; followed: boolean; onFollow: () => void; skipAds: boolean; onSkipAds: () => void; onOpenSettings: () => void; onDownload: () => void; isDownloaded: boolean; featuredEpisodes: Episode[]; onSelect: (episode: Episode) => void; downloaded: string[]; onEpisodeDownload: (episode: Episode) => void; downloading: string[]; currentTime: number; audioDuration: number
 }) {
   if (!episode) return <div className="page loading-home"><Sparkles size={26}/><h1>Loading live podcasts…</h1><p>Connecting to the Apple Podcasts catalog.</p></div>
   const listened = audioDuration ? formatTime(currentTime) : 'Not started'
@@ -200,17 +235,17 @@ function HomeView({ episode, playing, onPlay, followed, onFollow, skipAds, onSki
         <time>{line.time}</time><div><span>{line.ad && <WandSparkles size={14}/>} {line.ad ? 'AD DETECTED' : line.speaker}</span><p>{line.text}</p></div>{line.ad && <button className="skip-line"><SkipForward size={15}/>Skip</button>}</div>)}</div>
     </section>
     <div className="section-heading release-heading"><div><h2>Fresh from the catalog</h2><p>Live episodes from Apple Podcasts</p></div><button className="text-button">Browse <ChevronDown size={16}/></button></div>
-    <EpisodeList episodes={featuredEpisodes.slice(1, 4)} onSelect={onSelect} downloaded={downloaded} onDownload={onEpisodeDownload} compact/>
+    <EpisodeList episodes={featuredEpisodes.slice(1, 4)} onSelect={onSelect} downloaded={downloaded} onDownload={onEpisodeDownload} downloading={downloading} compact/>
   </div>
 }
 
-function LibraryView({ episodes, onSelect, downloaded, onDownload, search, downloads }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (id: string) => void; search: string; downloads?: boolean }) {
-  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : 'New releases from the shows you follow.'}</p><EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload}/></div>
+function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean }) {
+  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : 'New releases from the shows you follow.'}</p><EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading}/></div>
 }
 
-function EpisodeList({ episodes, onSelect, downloaded, onDownload, compact = false }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (id: string) => void; compact?: boolean }) {
+function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean }) {
   if (!episodes.length) return <div className="empty"><Download size={30}/><h3>Nothing downloaded yet</h3><p>Save episodes to listen without an internet connection.</p></div>
-  return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => <article className="episode-row" key={e.id} onClick={() => onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}</p></div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} onClick={event => { event.stopPropagation(); onDownload(e.id) }}><Download size={19}/></button><button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button></article>)}</div>
+  return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => <article className="episode-row" key={e.id} onClick={() => onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}</p></div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} disabled={downloading.includes(e.id)} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={downloaded.includes(e.id) ? 'Remove download' : 'Download episode'}>{downloading.includes(e.id) ? <Clock3 size={18}/> : <Download size={19}/>}</button><button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button></article>)}</div>
 }
 
 function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void }) {

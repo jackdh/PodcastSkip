@@ -1,5 +1,6 @@
 export type Episode = {
   id: string
+  episodeId?: number
   showId: number
   show: string
   author: string
@@ -54,6 +55,7 @@ const formatDuration = (milliseconds?: number) => {
 
 const episodeFromResult = (result: ItunesResult): Episode => ({
   id: String(result.trackId ?? `${result.collectionId}-${result.trackName}`),
+  episodeId: result.trackId,
   showId: result.collectionId ?? 0,
   show: result.collectionName ?? 'Podcast',
   author: result.artistName ?? 'Unknown creator',
@@ -63,6 +65,12 @@ const episodeFromResult = (result: ItunesResult): Episode => ({
   artwork: result.artworkUrl600 ?? result.artworkUrl100,
   audioUrl: result.episodeUrl,
 })
+
+export const playbackUrl = (episode: Episode) => {
+  if (!episode.audioUrl) return undefined
+  if (import.meta.env.DEV || !episode.episodeId || !episode.showId) return episode.audioUrl
+  return `/api/audio?showId=${episode.showId}&episodeId=${episode.episodeId}`
+}
 
 export async function searchCatalog(term: string) {
   const encodedTerm = term.trim()
