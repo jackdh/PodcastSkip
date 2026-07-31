@@ -5,6 +5,7 @@ import {
   Settings, Sparkles, WandSparkles
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
+import { forceAppUpdate } from './pwa'
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
 const downloadCacheName = 'podflow-downloads-v1'
@@ -129,34 +130,68 @@ function App() {
     const episode = activeEpisode
     const source = episode ? playbackUrl(episode) : undefined
     if (!source) { audioRef.current = null; return }
-    const audio = new Audio(source)
-    audio.preload = 'metadata'
-    let lastPersisted = 0
-    audio.addEventListener('loadedmetadata', () => {
-      setAudioDuration(audio.duration)
-      const resume = pendingResumeRef.current
-      if (resume && resume.id === episode?.id && resume.position > 0 && resume.position < audio.duration) {
-        audio.currentTime = resume.position
-        setCurrentTime(resume.position)
+
+    let cancelled = false
+    let objectUrl: string | null = null
+    let audio: HTMLAudioElement | null = null
+
+    const attachAudio = (playableUrl: string) => {
+      if (cancelled) return
+      audio = new Audio(playableUrl)
+      audio.preload = 'metadata'
+      let lastPersisted = 0
+      audio.addEventListener('loadedmetadata', () => {
+        if (!audio) return
+        setAudioDuration(audio.duration)
+        const resume = pendingResumeRef.current
+        if (resume && resume.id === episode?.id && resume.position > 0 && resume.position < audio.duration) {
+          audio.currentTime = resume.position
+          setCurrentTime(resume.position)
+        }
+        pendingResumeRef.current = null
+      })
+      audio.addEventListener('timeupdate', () => {
+        if (!audio) return
+        setCurrentTime(audio.currentTime)
+        if (Math.abs(audio.currentTime - lastPersisted) >= 5) {
+          lastPersisted = audio.currentTime
+          localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: audio.currentTime, updatedAt: Date.now() }))
+        }
+      })
+      audio.addEventListener('play', () => setPlaying(true))
+      audio.addEventListener('pause', () => setPlaying(false))
+      audio.addEventListener('ended', () => setPlaying(false))
+      audio.addEventListener('error', () => {
+        setPlaying(false)
+        setToast('This publisher does not allow playback in the browser.')
+      })
+      audioRef.current = audio
+    }
+
+    const resolvePlayableUrl = async () => {
+      if ('caches' in window) {
+        try {
+          const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
+          if (cancelled) return
+          if (cached) {
+            objectUrl = URL.createObjectURL(await cached.blob())
+            attachAudio(objectUrl)
+            return
+          }
+        } catch {
+          /* Fall through to network playback. */
+        }
       }
-      pendingResumeRef.current = null
-    })
-    audio.addEventListener('timeupdate', () => {
-      setCurrentTime(audio.currentTime)
-      if (Math.abs(audio.currentTime - lastPersisted) >= 5) {
-        lastPersisted = audio.currentTime
-        localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: audio.currentTime, updatedAt: Date.now() }))
-      }
-    })
-    audio.addEventListener('play', () => setPlaying(true))
-    audio.addEventListener('pause', () => setPlaying(false))
-    audio.addEventListener('ended', () => setPlaying(false))
-    audio.addEventListener('error', () => {
-      setPlaying(false)
-      setToast('This publisher does not allow playback in the browser.')
-    })
-    audioRef.current = audio
-    return () => audio.pause()
+      if (!cancelled) attachAudio(source)
+    }
+
+    void resolvePlayableUrl()
+
+    return () => {
+      cancelled = true
+      audio?.pause()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
   }, [activeEpisode])
 
   useEffect(() => {
@@ -270,7 +305,7 @@ function App() {
       {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" timeline />}
       {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage}/>}
-      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings}/>}
+      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings} onToast={setToast}/>}
     </section>
 
     <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} />
@@ -337,8 +372,70 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** unit).toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`
 }
 
-function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds, onSave, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; onSave: () => void; embedded?: boolean }) {
-  return <div className={`settings-panel ${embedded ? 'embedded' : ''}`}><div className="settings-head"><div className="settings-icon"><WandSparkles size={22}/></div><div><h2>Smart ad skipping</h2><p>Let AI find and skip ads in your downloads.</p></div></div><div className="settings-card"><div className="setting-row"><div><b>Automatically skip ads</b><p>Skip detected ad breaks during playback.</p></div><button className={skipAds ? 'toggle on' : 'toggle'} onClick={() => setSkipAds(!skipAds)}><i/></button></div><hr/><label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a><input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/></label><div className="key-note"><Sparkles size={15}/><span>Your key stays on this device and is only used to analyse downloaded transcripts.</span></div><label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a><select value={model} onChange={e => setModel(e.target.value)}><option value="google/gemini-2.5-flash">Gemini 2.5 Flash — recommended</option><option value="openai/gpt-4.1-mini">GPT-4.1 mini — precise</option><option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku — nuanced</option></select></label><div className="credit"><span>OpenRouter credit</span><strong>{apiKey ? 'Connect to check balance' : 'Add your key to check balance'}</strong></div></div><button className="save-settings" onClick={onSave}>Save settings</button></div>
+function formatBuildDate(iso: string) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds, onSave, onToast, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; onSave: () => void; onToast: (message: string) => void; embedded?: boolean }) {
+  const [updating, setUpdating] = useState(false)
+
+  const handleForceUpdate = async () => {
+    if (updating) return
+    setUpdating(true)
+    onToast('Checking for updates…')
+    try {
+      await forceAppUpdate()
+    } catch {
+      onToast('Update check failed. Please try again.')
+      setUpdating(false)
+    }
+  }
+
+  return (
+    <div className={`settings-panel ${embedded ? 'embedded' : ''}`}>
+      <div className="settings-head">
+        <div className="settings-icon"><WandSparkles size={22}/></div>
+        <div>
+          <h2>Smart ad skipping</h2>
+          <p>Let AI find and skip ads in your downloads.</p>
+        </div>
+      </div>
+      <div className="settings-card">
+        <div className="setting-row">
+          <div>
+            <b>Automatically skip ads</b>
+            <p>Skip detected ad breaks during playback.</p>
+          </div>
+          <button className={skipAds ? 'toggle on' : 'toggle'} onClick={() => setSkipAds(!skipAds)}><i/></button>
+        </div>
+        <hr/>
+        <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
+          <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/>
+        </label>
+        <div className="key-note"><Sparkles size={15}/><span>Your key stays on this device and is only used to analyse downloaded transcripts.</span></div>
+        <label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a>
+          <select value={model} onChange={e => setModel(e.target.value)}>
+            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash — recommended</option>
+            <option value="openai/gpt-4.1-mini">GPT-4.1 mini — precise</option>
+            <option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku — nuanced</option>
+          </select>
+        </label>
+        <div className="credit">
+          <span>OpenRouter credit</span>
+          <strong>{apiKey ? 'Connect to check balance' : 'Add your key to check balance'}</strong>
+        </div>
+      </div>
+      <button className="save-settings" onClick={onSave}>Save settings</button>
+      <div className="settings-update">
+        <button className="force-update" onClick={() => void handleForceUpdate()} disabled={updating}>
+          {updating ? 'Updating…' : 'Force update'}
+        </button>
+        <p className="app-version">Version {__APP_VERSION__} · Updated {formatBuildDate(__BUILD_TIME__)}</p>
+      </div>
+    </div>
+  )
 }
 
 export default App
