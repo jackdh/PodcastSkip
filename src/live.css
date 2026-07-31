@@ -20,6 +20,13 @@
 .detect-ads:disabled{opacity:.65;cursor:wait}
 .detect-ads.done{background:#f7fffb;color:#2f6f63;border-color:#c6ddd4}
 .episode-ad-actions{margin-top:2px}
+.spin{animation:spin 0.85s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.download{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:#7b8790;padding:0}
+.download.done{color:#1f6b5c;background:#e7f6f0}
+.download.busy{color:#4d6b62;background:#eef3f0}
+.episode-row.playing{background:#f3f8f5}
+.episode-row.playing .episode-info>span{color:#1f6b5c}
 .test-connection{margin-top:12px;width:100%;height:38px;background:#f4f8f5;color:#1f4f45;border:1px solid #c9ddd4;border-radius:6px;font-size:12px;font-weight:700}
 .test-connection:disabled{opacity:.65;cursor:wait}
 .test-connection:not(:disabled):hover{background:#e8f3ee}

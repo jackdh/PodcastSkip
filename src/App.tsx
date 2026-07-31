@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Bell, ChevronDown, Clock3, Download, Headphones, Home,
-  Library, MoreHorizontal, Pause, Play, Plus, RotateCcw, RotateCw, Search,
+  Bell, Check, ChevronDown, Download, Headphones, Home,
+  Library, LoaderCircle, MoreHorizontal, Pause, Play, Plus, RotateCcw, RotateCw, Search,
   Settings, Sparkles, WandSparkles
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
@@ -28,6 +28,7 @@ function Art({ artwork, label, large = false }: { artwork?: string; label: strin
 function App() {
   const [tab, setTab] = useState<Tab>('Home')
   const [timelineEpisodes, setTimelineEpisodes] = useState<Episode[]>([])
+  const [timelineStatus, setTimelineStatus] = useState<'idle' | 'loading'>('idle')
   const [activeEpisode, setActiveEpisode] = useState<Episode | null>(null)
   const [playing, setPlaying] = useState(false)
   const [followedShows, setFollowedShows] = useState<PodcastShow[]>(() => {
@@ -59,6 +60,7 @@ function App() {
   })
   const [detectingAds, setDetectingAds] = useState<string[]>([])
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null)
+  const [settingsReady, setSettingsReady] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
   const skipAdsRef = useRef(skipAds)
@@ -86,7 +88,13 @@ function App() {
         setActiveEpisode(nowPlaying.episode)
       }
     } catch { /* Ignore malformed local playback state. */ }
+    setSettingsReady(true)
   }, [])
+
+  useEffect(() => {
+    if (!settingsReady) return
+    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey }))
+  }, [settingsReady, skipAds, model, apiKey])
 
   useEffect(() => {
     localStorage.setItem('podflow-downloads', JSON.stringify(downloadedEpisodes))
@@ -119,13 +127,16 @@ function App() {
     let cancelled = false
     if (!followedShows.length) {
       setTimelineEpisodes([])
+      setTimelineStatus('idle')
       return
     }
+    setTimelineStatus('loading')
     Promise.all(followedShows.map((show) => getShowEpisodes(show.id).catch(() => []))).then((episodeLists) => {
       if (!cancelled) {
         setTimelineEpisodes(episodeLists.flat().sort((a, b) =>
           new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
         ))
+        setTimelineStatus('idle')
       }
     })
     return () => { cancelled = true }
@@ -295,6 +306,12 @@ function App() {
     if (isDownloaded) {
       await caches.open(downloadCacheName).then((cache) => cache.delete(source))
       setDownloadedEpisodes((items) => items.filter((item) => item.id !== episode.id))
+      setAdSegmentsByEpisode((current) => {
+        if (!(episode.id in current)) return current
+        const next = { ...current }
+        delete next[episode.id]
+        return next
+      })
       void refreshStorageUsage()
       setToast('Removed downloaded episode')
       return
@@ -404,6 +421,9 @@ function App() {
   }
 
   const downloaded = downloadedEpisodes.map((episode) => episode.id)
+  const downloadBytesById = Object.fromEntries(
+    downloadedEpisodes.map((episode) => [episode.id, episode.downloadBytes ?? 0]),
+  )
   const activeAdSegments = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
 
   return <main>
@@ -437,12 +457,12 @@ function App() {
       </header>
 
       {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
-      {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" timeline />}
-      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved}/>}
+      {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} search="" timeline timelineStatus={timelineStatus} activeEpisodeId={activeEpisode?.id} />}
+      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved} activeEpisodeId={activeEpisode?.id}/>}
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
     </section>
 
-    <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} adSegments={activeAdSegments} />
+    <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} adSegments={activeAdSegments} downloaded={Boolean(activeEpisode && downloaded.includes(activeEpisode.id))} />
     <div className="mobile-nav">{([
       ['Home', Home], ['Library', Library], ['Downloads', Download], ['Settings', Settings]
     ] as const).map(([name, Icon]) => <button key={name} onClick={() => setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
@@ -455,24 +475,29 @@ function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSel
   return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <div className="show-card" key={show.id}><button className="show-card-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
-function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, timeline, storageUsage, adSegmentsByEpisode, detectingAds, onDetectAds, secondsSaved }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; secondsSaved?: number }) {
-  const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? 0), 0)
+function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, search, downloads, timeline, timelineStatus, storageUsage, adSegmentsByEpisode, detectingAds, onDetectAds, secondsSaved, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; timelineStatus?: 'idle' | 'loading'; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; secondsSaved?: number; activeEpisodeId?: string }) {
+  const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? downloadBytesById?.[episode.id] ?? 0), 0)
   const emptyText = timeline ? 'Follow podcasts using search to build your episode Timeline.' : 'Save episodes to listen without an internet connection.'
-  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}{episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
+  const loadingTimeline = timeline && timelineStatus === 'loading' && !episodes.length
+  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}{loadingTimeline ? <div className="empty"><LoaderCircle className="spin" size={30}/><h3>Loading timeline</h3><p>Fetching the latest episodes from your shows…</p></div> : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
 }
 
-function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, detectingAds = [], onDetectAds }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void }) {
+function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, detectingAds = [], onDetectAds, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; activeEpisodeId?: string }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   if (!episodes.length) return <div className="empty"><Download size={30}/><h3>Nothing downloaded yet</h3><p>Save episodes to listen without an internet connection.</p></div>
   return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => {
     const expanded = expandedId === e.id
     const segments = adSegmentsByEpisode?.[e.id] ?? []
     const detecting = detectingAds.includes(e.id)
-    return <article className={`episode-row ${expanded ? 'expanded' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{downloaded.includes(e.id) && e.downloadBytes ? ` · ${formatBytes(e.downloadBytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>Play episode</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <Clock3 size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Detecting…' : segments.length ? 'Re-scan ads' : 'Highlight ads'}</button></div>}</div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} disabled={downloading.includes(e.id)} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={downloaded.includes(e.id) ? 'Remove download' : 'Download episode'}>{downloading.includes(e.id) ? <Clock3 size={18}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
+    const isDownloaded = downloaded.includes(e.id)
+    const isDownloading = downloading.includes(e.id)
+    const isActive = activeEpisodeId === e.id
+    const bytes = e.downloadBytes ?? downloadBytesById?.[e.id] ?? 0
+    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <LoaderCircle className="spin" size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Detecting…' : segments.length ? 'Re-scan ads' : 'Highlight ads'}</button></div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} disabled={isDownloading} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Downloading episode' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading…' : 'Download episode'}>{isDownloading ? <LoaderCircle className="spin" size={18}/> : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
   })}</div>
 }
 
-function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, adSegments }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; adSegments: AdSegment[] }) {
+function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, adSegments, downloaded = false }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; adSegments: AdSegment[]; downloaded?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   if (!episode) return null
   const trackMax = duration || 1
@@ -505,7 +530,7 @@ function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, ad
     <div className="player-bar-main">
       <button className="now" onClick={() => setExpanded(open => !open)} aria-expanded={expanded} aria-label={expanded ? 'Collapse player' : 'Expand player'}>
         <Art artwork={episode.artwork} label={episode.show}/>
-        <div><b>{episode.title}</b><span>{episode.show}{adSegments.length ? ` · ${adSegments.length} ads marked` : ''}</span></div>
+        <div><b>{episode.title}</b><span>{episode.show}{adSegments.length ? ` · ${adSegments.length} ads marked` : ''}{downloaded ? ' · Downloaded' : ''}</span></div>
         <ChevronDown className={expanded ? 'chevron-up' : ''} size={16}/>
       </button>
       {!expanded && <button className="player-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause fill="currentColor" size={18}/> : <Play fill="currentColor" size={18}/>}</button>}
