@@ -1,7 +1,15 @@
+import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount } from './audioTranscript'
+
 export type AdSegment = {
   start: number
   end: number
   label?: string
+}
+
+export type TranscriptCue = {
+  start: number
+  end: number
+  text: string
 }
 
 export type KeyStatus = {
@@ -25,9 +33,24 @@ type ChatResponse = {
   error?: { message?: string }
 }
 
-const openRouterHeaders = (apiKey: string) => ({
+type TranscriptionSegment = {
+  start?: number
+  end?: number
+  text?: string
+}
+
+type TranscriptionResponse = {
+  text?: string
+  segments?: TranscriptionSegment[]
+  error?: { message?: string }
+}
+
+const DEFAULT_STT_MODEL = 'openai/whisper-1'
+const CHUNK_SECONDS = 45
+
+const openRouterHeaders = (apiKey: string, contentType = 'application/json') => ({
   Authorization: `Bearer ${apiKey}`,
-  'Content-Type': 'application/json',
+  'Content-Type': contentType,
   'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://podcastskip.pages.dev',
   'X-OpenRouter-Title': 'Podflow',
 })
@@ -96,52 +119,166 @@ function normalizeSegments(raw: unknown, durationSeconds: number): AdSegment[] {
       label: typeof record.label === 'string' ? record.label : typeof record.type === 'string' ? record.type : undefined,
     })
   }
-  return segments.sort((a, b) => a.start - b.start)
+  return mergeOverlappingSegments(segments.sort((a, b) => a.start - b.start))
 }
 
-export async function detectAdSegments(options: {
+function mergeOverlappingSegments(segments: AdSegment[]): AdSegment[] {
+  if (!segments.length) return []
+  const merged: AdSegment[] = [{ ...segments[0] }]
+  for (let i = 1; i < segments.length; i += 1) {
+    const current = segments[i]
+    const last = merged[merged.length - 1]
+    if (current.start <= last.end + 1.5) {
+      last.end = Math.max(last.end, current.end)
+      if (current.label && !last.label) last.label = current.label
+    } else {
+      merged.push({ ...current })
+    }
+  }
+  return merged
+}
+
+function formatCueClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const minutes = Math.floor(total / 60)
+  const secs = total % 60
+  return `${minutes}:${secs.toString().padStart(2, '0')}`
+}
+
+function formatTranscriptForPrompt(cues: TranscriptCue[]): string {
+  return cues
+    .map((cue) => `[${formatCueClock(cue.start)}-${formatCueClock(cue.end)}] ${cue.text.trim()}`)
+    .filter((line) => line.length > 12)
+    .join('\n')
+}
+
+async function transcribeChunk(
+  apiKey: string,
+  base64Wav: string,
+  offsetSeconds: number,
+  sttModel: string,
+): Promise<TranscriptCue[]> {
+  const response = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: openRouterHeaders(apiKey),
+    body: JSON.stringify({
+      model: sttModel,
+      language: 'en',
+      response_format: 'verbose_json',
+      timestamp_granularities: ['segment'],
+      input_audio: {
+        data: base64Wav,
+        format: 'wav',
+      },
+    }),
+  })
+
+  if (response.status === 401) throw new Error('API key is invalid or revoked.')
+  if (response.status === 402) throw new Error('OpenRouter credits are exhausted.')
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(detail ? `Transcription failed: ${detail.slice(0, 180)}` : `Transcription failed (${response.status}).`)
+  }
+
+  const payload = await response.json() as TranscriptionResponse
+  if (payload.error?.message) throw new Error(payload.error.message)
+
+  if (payload.segments?.length) {
+    return payload.segments
+      .map((segment) => {
+        const text = (segment.text ?? '').trim()
+        const start = Number(segment.start)
+        const end = Number(segment.end)
+        if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+        return {
+          start: offsetSeconds + start,
+          end: offsetSeconds + end,
+          text,
+        } satisfies TranscriptCue
+      })
+      .filter((cue): cue is TranscriptCue => Boolean(cue))
+  }
+
+  const text = (payload.text ?? '').trim()
+  if (!text) return []
+  return [{ start: offsetSeconds, end: offsetSeconds + CHUNK_SECONDS, text }]
+}
+
+export async function transcribeEpisodeAudio(options: {
+  apiKey: string
+  audioBlob: Blob
+  sttModel?: string
+  onProgress?: (message: string) => void
+}): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
+  const trimmed = options.apiKey.trim()
+  if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
+
+  options.onProgress?.('Decoding downloaded audio…')
+  const samples = await decodeEpisodeAudio(options.audioBlob)
+  const durationSeconds = samples.length / 16000
+  if (durationSeconds < 15) throw new Error('This episode is too short to analyse for ads.')
+
+  const totalChunks = wavChunkCount(samples.length, 16000, CHUNK_SECONDS)
+  const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
+  const cues: TranscriptCue[] = []
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const chunk = encodeWavChunkAt(samples, index, 16000, CHUNK_SECONDS)
+    if (!chunk) continue
+    options.onProgress?.(`Transcribing audio ${index + 1}/${totalChunks}…`)
+    const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, chunk.offsetSeconds, sttModel)
+    cues.push(...chunkCues)
+  }
+
+  if (!cues.length) throw new Error('Transcription returned no speech to analyse.')
+  return { cues, durationSeconds }
+}
+
+export async function detectAdSegmentsFromTranscript(options: {
   apiKey: string
   model: string
   title: string
   show: string
   description?: string
   durationSeconds: number
+  cues: TranscriptCue[]
 }): Promise<AdSegment[]> {
   const trimmed = options.apiKey.trim()
   if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
-  if (!options.durationSeconds || options.durationSeconds < 30) {
-    throw new Error('Episode duration is needed before ads can be detected.')
-  }
+  if (!options.cues.length) throw new Error('No transcript available for ad detection.')
 
-  const durationMinutes = Math.round(options.durationSeconds / 60)
-  const prompt = `You analyse podcast episode metadata to estimate advertisement / sponsor break timestamps.
+  const transcript = formatTranscriptForPrompt(options.cues).slice(0, 100_000)
+  const prompt = `You are analysing a timed podcast transcript to find advertisement and sponsor-read segments.
 
-Return ONLY JSON of the form:
-{"segments":[{"start":0,"end":45,"label":"pre-roll"}]}
+Return ONLY JSON:
+{"segments":[{"start":12.5,"end":67.0,"label":"sponsor read"}]}
 
 Rules:
-- start and end are seconds from the beginning of the episode
-- episode length is ${options.durationSeconds} seconds (~${durationMinutes} minutes)
-- Prefer explicit sponsor or ad cues in the description when present
-- Otherwise estimate typical podcast ad placement (short pre-roll, mid-rolls, optional post-roll)
-- Keep segments between 15 and 120 seconds each
-- Do not invent segments that cover more than ~25% of the episode total
-- If no ads seem likely, return {"segments":[]}
+- start/end are seconds from episode start
+- episode length is ${options.durationSeconds.toFixed(1)} seconds
+- Use the transcript timestamps; do not invent times outside spoken cues
+- Mark host-read ads, sponsored messages, network ads, "this show is brought to you by", discount codes, and similar commercial reads
+- Do NOT mark show intros/outros that are not selling something
+- Merge contiguous ad copy into one segment
+- If unsure, omit the segment
+- If none found, return {"segments":[]}
 
 Show: ${options.show}
 Title: ${options.title}
-Description:
-${(options.description ?? 'No description provided.').slice(0, 3500)}`
+Description: ${(options.description ?? '').slice(0, 1200)}
+
+Transcript:
+${transcript}`
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: openRouterHeaders(trimmed),
     body: JSON.stringify({
       model: options.model,
-      temperature: 0.2,
+      temperature: 0.1,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'You are a podcast ad-break detector. Reply with JSON only.' },
+        { role: 'system', content: 'You detect podcast advertisements from timed transcripts. Reply with JSON only.' },
         { role: 'user', content: prompt },
       ],
     }),
@@ -160,6 +297,34 @@ ${(options.description ?? 'No description provided.').slice(0, 3500)}`
   if (!content) throw new Error('OpenRouter returned an empty response.')
 
   return normalizeSegments(extractJsonObject(content), options.durationSeconds)
+}
+
+export async function detectAdSegmentsFromAudio(options: {
+  apiKey: string
+  model: string
+  title: string
+  show: string
+  description?: string
+  audioBlob: Blob
+  sttModel?: string
+  onProgress?: (message: string) => void
+}): Promise<AdSegment[]> {
+  const { cues, durationSeconds } = await transcribeEpisodeAudio({
+    apiKey: options.apiKey,
+    audioBlob: options.audioBlob,
+    sttModel: options.sttModel,
+    onProgress: options.onProgress,
+  })
+  options.onProgress?.('Finding ad breaks in the transcript…')
+  return detectAdSegmentsFromTranscript({
+    apiKey: options.apiKey,
+    model: options.model,
+    title: options.title,
+    show: options.show,
+    description: options.description,
+    durationSeconds,
+    cues,
+  })
 }
 
 export function formatCredits(value: number | null): string {

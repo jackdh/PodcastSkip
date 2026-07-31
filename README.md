@@ -39,7 +39,12 @@ npm run storybook
 ## OpenRouter integration note
 
 API-key storage stays client-local. Settings can verify the key against
-OpenRouter (`GET /api/v1/key`). Ad highlighting currently estimates break
-timestamps from episode metadata via chat completions; real transcript or
-audio analysis can replace that later. Production deployments should prefer a
-secure backend or user-owned key vault for key handling.
+OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
+
+1. Sends the cached episode audio to OpenRouter speech-to-text (`openai/whisper-1`)
+   in short chunks with timed transcript segments.
+2. Asks your chosen analysis model to mark advertisement ranges from that transcript.
+
+Production deployments should prefer a secure backend or user-owned key vault for
+key handling. Long episodes take several transcription requests and will use
+OpenRouter credits.

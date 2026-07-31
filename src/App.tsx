@@ -7,10 +7,9 @@ import {
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
 import {
   checkOpenRouterKey,
-  detectAdSegments,
+  detectAdSegmentsFromAudio,
   formatCredits,
   formatMinutesSaved,
-  parseDurationToSeconds,
   type AdSegment,
   type KeyStatus,
 } from './openRouter'
@@ -158,9 +157,10 @@ function App() {
 
   useEffect(() => {
     if (!toast) return
+    if (detectingAds.length) return
     const timer = window.setTimeout(() => setToast(''), 4200)
     return () => window.clearTimeout(timer)
-  }, [toast])
+  }, [toast, detectingAds])
 
   useEffect(() => {
     let cancelled = false
@@ -389,30 +389,30 @@ function App() {
       setTab('Settings')
       return
     }
+    const source = playbackUrl(episode)
+    if (!source || !('caches' in window)) {
+      setToast('Download this episode first so we can analyse the audio.')
+      return
+    }
     setDetectingAds((items) => [...items, episode.id])
-    setToast(`Detecting ads in “${episode.title}”…`)
+    setToast(`Preparing audio for “${episode.title}”…`)
     try {
-      let durationSeconds = (activeEpisode?.id === episode.id && audioDuration > 0)
-        ? audioDuration
-        : parseDurationToSeconds(episode.duration)
-      if (!durationSeconds) {
-        durationSeconds = await probeEpisodeDuration(episode)
-      }
-      if (!durationSeconds) {
-        throw new Error('Episode duration is needed before ads can be detected.')
-      }
-      const segments = await detectAdSegments({
+      const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
+      if (!cached) throw new Error('Download this episode first so we can analyse the audio.')
+      const audioBlob = await cached.blob()
+      const segments = await detectAdSegmentsFromAudio({
         apiKey,
         model,
         title: episode.title,
         show: episode.show,
         description: episode.description,
-        durationSeconds,
+        audioBlob,
+        onProgress: (message) => setToast(message),
       })
       setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
       setToast(segments.length
-        ? `Marked ${segments.length} ad ${segments.length === 1 ? 'segment' : 'segments'} on the progress bar`
-        : 'No ad segments found for this episode')
+        ? `Marked ${segments.length} ad ${segments.length === 1 ? 'segment' : 'segments'} from the audio transcript`
+        : 'No ad segments found in the transcript')
     } catch (error) {
       setToast(error instanceof Error ? error.message : 'Ad detection failed.')
     } finally {
@@ -493,7 +493,7 @@ function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDown
     const isDownloading = downloading.includes(e.id)
     const isActive = activeEpisodeId === e.id
     const bytes = e.downloadBytes ?? downloadBytesById?.[e.id] ?? 0
-    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <LoaderCircle className="spin" size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Detecting…' : segments.length ? 'Re-scan ads' : 'Highlight ads'}</button></div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} disabled={isDownloading} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Downloading episode' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading…' : 'Download episode'}>{isDownloading ? <LoaderCircle className="spin" size={18}/> : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
+    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <LoaderCircle className="spin" size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Scanning audio…' : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button></div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} disabled={isDownloading} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Downloading episode' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading…' : 'Download episode'}>{isDownloading ? <LoaderCircle className="spin" size={18}/> : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
   })}</div>
 }
 
@@ -565,34 +565,6 @@ function formatBuildDate(iso: string) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-async function probeEpisodeDuration(episode: Episode): Promise<number | undefined> {
-  const source = playbackUrl(episode)
-  if (!source) return undefined
-  let objectUrl: string | null = null
-  try {
-    let playable = source
-    if ('caches' in window) {
-      const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
-      if (cached) {
-        objectUrl = URL.createObjectURL(await cached.blob())
-        playable = objectUrl
-      }
-    }
-    const duration = await new Promise<number>((resolve, reject) => {
-      const audio = new Audio()
-      audio.preload = 'metadata'
-      audio.onloadedmetadata = () => resolve(audio.duration)
-      audio.onerror = () => reject(new Error('Unable to read episode duration'))
-      audio.src = playable
-    })
-    return Number.isFinite(duration) && duration > 0 ? duration : undefined
-  } catch {
-    return undefined
-  } finally {
-    if (objectUrl) URL.revokeObjectURL(objectUrl)
-  }
-}
-
 function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds, onSave, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; onSave: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
   const [updating, setUpdating] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -648,7 +620,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
           <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>Your key stays on this device and is used to check the connection and estimate ad breaks in downloads.</span></div>
+        <div className="key-note"><Sparkles size={15}/><span>Your key stays on this device. Highlight ads uploads the downloaded audio to OpenRouter for Whisper transcription, then your analysis model finds ad breaks.</span></div>
         <label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a>
           <select value={model} onChange={e => setModel(e.target.value)}>
             <option value="google/gemini-2.5-flash">Gemini 2.5 Flash — recommended</option>
