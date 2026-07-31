@@ -13,6 +13,8 @@ episode transcripts and skips them during playback.
 - Same-origin Pages Function audio streaming and persistent Cache Storage downloads for offline listening.
 - Interactive transcript with clearly marked AI-detected advertisement ranges.
 - Local settings for automatic ad skipping and an OpenRouter API key/model choice.
+- OpenRouter connection test from Settings, plus local minutes-saved tracking.
+- Highlight ads on downloaded episodes; red markers on the progress bar and auto-skip during playback.
 - Storybook design lab with desktop and mobile app stories.
 
 ## PWA notes
@@ -36,7 +38,8 @@ npm run storybook
 
 ## OpenRouter integration note
 
-This prototype deliberately keeps API-key storage and transcript analysis
-client-local. Production use should route OpenRouter requests through a secure
-backend or a user-owned key vault. The ad-marked transcript remains a
-demonstration until real transcript extraction and analysis are implemented.
+API-key storage stays client-local. Settings can verify the key against
+OpenRouter (`GET /api/v1/key`). Ad highlighting currently estimates break
+timestamps from episode metadata via chat completions; real transcript or
+audio analysis can replace that later. Production deployments should prefer a
+secure backend or user-owned key vault for key handling.

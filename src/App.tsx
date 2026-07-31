@@ -5,7 +5,18 @@ import {
   Settings, Sparkles, WandSparkles
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
+import {
+  checkOpenRouterKey,
+  detectAdSegments,
+  formatCredits,
+  formatMinutesSaved,
+  parseDurationToSeconds,
+  type AdSegment,
+  type KeyStatus,
+} from './openRouter'
 import { forceAppUpdate } from './pwa'
+
+type AdSegmentMap = Record<string, AdSegment[]>
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
 const downloadCacheName = 'podflow-downloads-v1'
@@ -38,8 +49,22 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
   const [storageUsage, setStorageUsage] = useState({ usage: 0, quota: 0 })
+  const [adSegmentsByEpisode, setAdSegmentsByEpisode] = useState<AdSegmentMap>(() => {
+    try { return JSON.parse(localStorage.getItem('podflow-ad-segments') ?? '{}') as AdSegmentMap }
+    catch { return {} }
+  })
+  const [secondsSaved, setSecondsSaved] = useState(() => {
+    const saved = Number(localStorage.getItem('podflow-seconds-saved') ?? 0)
+    return Number.isFinite(saved) ? saved : 0
+  })
+  const [detectingAds, setDetectingAds] = useState<string[]>([])
+  const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
+  const skipAdsRef = useRef(skipAds)
+  const adSegmentsRef = useRef<AdSegment[]>([])
+  const skippedAdKeysRef = useRef<Set<string>>(new Set())
+  const activeEpisodeIdRef = useRef<string | null>(null)
   const refreshStorageUsage = async () => {
     if (!navigator.storage?.estimate) return
     const { usage = 0, quota = 0 } = await navigator.storage.estimate()
@@ -67,6 +92,24 @@ function App() {
     localStorage.setItem('podflow-downloads', JSON.stringify(downloadedEpisodes))
     void refreshStorageUsage()
   }, [downloadedEpisodes])
+
+  useEffect(() => {
+    localStorage.setItem('podflow-ad-segments', JSON.stringify(adSegmentsByEpisode))
+  }, [adSegmentsByEpisode])
+
+  useEffect(() => {
+    localStorage.setItem('podflow-seconds-saved', String(secondsSaved))
+  }, [secondsSaved])
+
+  useEffect(() => {
+    skipAdsRef.current = skipAds
+  }, [skipAds])
+
+  useEffect(() => {
+    adSegmentsRef.current = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
+    skippedAdKeysRef.current = new Set()
+    activeEpisodeIdRef.current = activeEpisode?.id ?? null
+  }, [activeEpisode, adSegmentsByEpisode])
 
   useEffect(() => {
     localStorage.setItem('podflow-followed-shows', JSON.stringify(followedShows))
@@ -152,10 +195,25 @@ function App() {
       })
       audio.addEventListener('timeupdate', () => {
         if (!audio) return
-        setCurrentTime(audio.currentTime)
-        if (Math.abs(audio.currentTime - lastPersisted) >= 5) {
-          lastPersisted = audio.currentTime
-          localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: audio.currentTime, updatedAt: Date.now() }))
+        let time = audio.currentTime
+        if (skipAdsRef.current) {
+          const hit = adSegmentsRef.current.find((segment) => time >= segment.start && time < segment.end - 0.35)
+          if (hit) {
+            const skipped = Math.max(0, hit.end - time)
+            const skipKey = `${activeEpisodeIdRef.current}:${hit.start}-${hit.end}`
+            audio.currentTime = hit.end
+            time = hit.end
+            if (skipped > 0.5 && !skippedAdKeysRef.current.has(skipKey)) {
+              skippedAdKeysRef.current.add(skipKey)
+              setSecondsSaved((total) => total + skipped)
+              setToast(`Skipped ${formatMinutesSaved(skipped)} of ads`)
+            }
+          }
+        }
+        setCurrentTime(time)
+        if (Math.abs(time - lastPersisted) >= 5) {
+          lastPersisted = time
+          localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: time, updatedAt: Date.now() }))
         }
       })
       audio.addEventListener('play', () => setPlaying(true))
@@ -254,9 +312,15 @@ function App() {
     catch { setToast('Playback was blocked. Tap play again to start listening.') }
   }
   const seekTo = (time: number) => {
-    if (audioRef.current) audioRef.current.currentTime = time
-    setCurrentTime(time)
-    if (activeEpisode) localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode: activeEpisode, position: time, updatedAt: Date.now() }))
+    let next = time
+    if (skipAds && activeEpisode) {
+      const segments = adSegmentsByEpisode[activeEpisode.id] ?? []
+      const hit = segments.find((segment) => next >= segment.start && next < segment.end - 0.35)
+      if (hit) next = hit.end
+    }
+    if (audioRef.current) audioRef.current.currentTime = next
+    setCurrentTime(next)
+    if (activeEpisode) localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode: activeEpisode, position: next, updatedAt: Date.now() }))
   }
   const toggleFollowShow = (show: PodcastShow) => {
     const isFollowed = followedShows.some((item) => item.id === show.id)
@@ -267,10 +331,58 @@ function App() {
   const saveSettings = () => {
     localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey }))
     setToast('Ad skip settings saved')
-    setTimeout(() => setToast(''), 2300)
+  }
+  const testOpenRouterConnection = async () => {
+    try {
+      const status = await checkOpenRouterKey(apiKey)
+      setKeyStatus(status)
+      localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey }))
+      setToast(`Connected to OpenRouter · ${formatCredits(status.limitRemaining)}`)
+    } catch (error) {
+      setKeyStatus(null)
+      setToast(error instanceof Error ? error.message : 'Could not connect to OpenRouter.')
+    }
+  }
+  const highlightAds = async (episode: Episode) => {
+    if (detectingAds.includes(episode.id)) return
+    if (!apiKey.trim()) {
+      setToast('Add an OpenRouter API key in Settings first.')
+      setTab('Settings')
+      return
+    }
+    setDetectingAds((items) => [...items, episode.id])
+    setToast(`Detecting ads in “${episode.title}”…`)
+    try {
+      let durationSeconds = (activeEpisode?.id === episode.id && audioDuration > 0)
+        ? audioDuration
+        : parseDurationToSeconds(episode.duration)
+      if (!durationSeconds) {
+        durationSeconds = await probeEpisodeDuration(episode)
+      }
+      if (!durationSeconds) {
+        throw new Error('Episode duration is needed before ads can be detected.')
+      }
+      const segments = await detectAdSegments({
+        apiKey,
+        model,
+        title: episode.title,
+        show: episode.show,
+        description: episode.description,
+        durationSeconds,
+      })
+      setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
+      setToast(segments.length
+        ? `Marked ${segments.length} ad ${segments.length === 1 ? 'segment' : 'segments'} on the progress bar`
+        : 'No ad segments found for this episode')
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Ad detection failed.')
+    } finally {
+      setDetectingAds((items) => items.filter((id) => id !== episode.id))
+    }
   }
 
   const downloaded = downloadedEpisodes.map((episode) => episode.id)
+  const activeAdSegments = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
 
   return <main>
     <aside className="sidebar">
@@ -304,11 +416,11 @@ function App() {
 
       {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" timeline />}
-      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage}/>}
-      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings} onToast={setToast}/>}
+      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved}/>}
+      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} onSave={saveSettings} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
     </section>
 
-    <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} />
+    <PlayerBar episode={activeEpisode} playing={playing} onPlay={togglePlayback} currentTime={currentTime} duration={audioDuration} onSeek={seekTo} adSegments={activeAdSegments} />
     <div className="mobile-nav">{([
       ['Home', Home], ['Library', Library], ['Downloads', Download], ['Settings', Settings]
     ] as const).map(([name, Icon]) => <button key={name} onClick={() => setTab(name)} className={tab === name ? 'active' : ''}><Icon size={19}/><span>{name === 'Library' ? 'Timeline' : name}</span></button>)}</div>
@@ -321,35 +433,60 @@ function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSel
   return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <div className="show-card" key={show.id}><button className="show-card-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
-function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, timeline, storageUsage }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; storageUsage?: { usage: number; quota: number } }) {
+function LibraryView({ episodes, onSelect, downloaded, onDownload, downloading, search, downloads, timeline, storageUsage, adSegmentsByEpisode, detectingAds, onDetectAds, secondsSaved }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; secondsSaved?: number }) {
   const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? 0), 0)
   const emptyText = timeline ? 'Follow podcasts using search to build your episode Timeline.' : 'Save episodes to listen without an internet connection.'
-  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div></div>}{episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading} expandable={timeline}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
+  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Saved on this device. Ready whenever you are.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}{episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} onDownload={onDownload} downloading={downloading} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
 }
 
-function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false, expandable = false }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean }) {
+function EpisodeList({ episodes, onSelect, downloaded, onDownload, downloading, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, detectingAds = [], onDetectAds }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   if (!episodes.length) return <div className="empty"><Download size={30}/><h3>Nothing downloaded yet</h3><p>Save episodes to listen without an internet connection.</p></div>
   return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => {
     const expanded = expandedId === e.id
-    return <article className={`episode-row ${expanded ? 'expanded' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{downloaded.includes(e.id) && e.downloadBytes ? ` · ${formatBytes(e.downloadBytes)}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>Play episode</button><span>{e.author} · {e.date}</span></div></div>}</div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} disabled={downloading.includes(e.id)} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={downloaded.includes(e.id) ? 'Remove download' : 'Download episode'}>{downloading.includes(e.id) ? <Clock3 size={18}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
+    const segments = adSegmentsByEpisode?.[e.id] ?? []
+    const detecting = detectingAds.includes(e.id)
+    return <article className={`episode-row ${expanded ? 'expanded' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{downloaded.includes(e.id) && e.downloadBytes ? ` · ${formatBytes(e.downloadBytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>Play episode</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <Clock3 size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Detecting…' : segments.length ? 'Re-scan ads' : 'Highlight ads'}</button></div>}</div><button className={`download ${downloaded.includes(e.id) ? 'done' : ''}`} disabled={downloading.includes(e.id)} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={downloaded.includes(e.id) ? 'Remove download' : 'Download episode'}>{downloading.includes(e.id) ? <Clock3 size={18}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
   })}</div>
 }
 
-function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void }) {
+function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, adSegments }: { episode: Episode | null; playing: boolean; onPlay: () => void; currentTime: number; duration: number; onSeek: (time: number) => void; adSegments: AdSegment[] }) {
   const [expanded, setExpanded] = useState(false)
   if (!episode) return null
+  const trackMax = duration || 1
+  const progressTrack = (
+    <div className="track">
+      {expanded && <span>{formatTime(currentTime)}</span>}
+      <div className="track-rail">
+        {duration > 0 && adSegments.map((segment) => (
+          <i
+            key={`${segment.start}-${segment.end}`}
+            className="ad-marker"
+            style={{
+              left: `${(segment.start / trackMax) * 100}%`,
+              width: `${(Math.max(segment.end - segment.start, 1) / trackMax) * 100}%`,
+            }}
+            title={segment.label ?? 'Ad segment'}
+          />
+        ))}
+        <i className="progress-fill" style={{ width: `${Math.min(100, (currentTime / trackMax) * 100)}%` }} />
+        <input aria-label="Playback progress" type="range" min="0" max={trackMax} step="0.1" value={Math.min(currentTime, trackMax)} onChange={e => onSeek(Number(e.target.value))}/>
+      </div>
+      {expanded && <span>{duration ? formatTime(duration) : episode.duration}</span>}
+    </div>
+  )
   return <div className={`player-bar ${expanded ? 'expanded' : ''}`}>
+    {!expanded && <div className="player-progress-slim">{progressTrack}</div>}
     <div className="player-bar-main">
       <button className="now" onClick={() => setExpanded(open => !open)} aria-expanded={expanded} aria-label={expanded ? 'Collapse player' : 'Expand player'}>
         <Art artwork={episode.artwork} label={episode.show}/>
-        <div><b>{episode.title}</b><span>{episode.show}</span></div>
+        <div><b>{episode.title}</b><span>{episode.show}{adSegments.length ? ` · ${adSegments.length} ads marked` : ''}</span></div>
         <ChevronDown className={expanded ? 'chevron-up' : ''} size={16}/>
       </button>
       {!expanded && <button className="player-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause fill="currentColor" size={18}/> : <Play fill="currentColor" size={18}/>}</button>}
     </div>
     {expanded && <div className="player-bar-body">
-      <div className="track"><span>{formatTime(currentTime)}</span><input aria-label="Playback progress" type="range" min="0" max={duration || 1} value={Math.min(currentTime, duration || 1)} onChange={e => onSeek(Number(e.target.value))}/><span>{duration ? formatTime(duration) : episode.duration}</span></div>
+      {progressTrack}
       <div className="controls">
         <button className="skip-control" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds"><RotateCcw size={28} strokeWidth={1.75}/><span>15</span></button>
         <button className="player-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause fill="currentColor" size={22}/> : <Play fill="currentColor" size={22}/>}</button>
@@ -378,8 +515,37 @@ function formatBuildDate(iso: string) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds, onSave, onToast, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; onSave: () => void; onToast: (message: string) => void; embedded?: boolean }) {
+async function probeEpisodeDuration(episode: Episode): Promise<number | undefined> {
+  const source = playbackUrl(episode)
+  if (!source) return undefined
+  let objectUrl: string | null = null
+  try {
+    let playable = source
+    if ('caches' in window) {
+      const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
+      if (cached) {
+        objectUrl = URL.createObjectURL(await cached.blob())
+        playable = objectUrl
+      }
+    }
+    const duration = await new Promise<number>((resolve, reject) => {
+      const audio = new Audio()
+      audio.preload = 'metadata'
+      audio.onloadedmetadata = () => resolve(audio.duration)
+      audio.onerror = () => reject(new Error('Unable to read episode duration'))
+      audio.src = playable
+    })
+    return Number.isFinite(duration) && duration > 0 ? duration : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+  }
+}
+
+function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds, onSave, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; onSave: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
   const [updating, setUpdating] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   const handleForceUpdate = async () => {
     if (updating) return
@@ -390,6 +556,16 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
     } catch {
       onToast('Update check failed. Please try again.')
       setUpdating(false)
+    }
+  }
+
+  const handleTestConnection = async () => {
+    if (testing) return
+    setTesting(true)
+    try {
+      await onTestConnection()
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -411,10 +587,18 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
           <button className={skipAds ? 'toggle on' : 'toggle'} onClick={() => setSkipAds(!skipAds)}><i/></button>
         </div>
         <hr/>
+        <div className="setting-row">
+          <div>
+            <b>Minutes saved</b>
+            <p>Ad time skipped on this device.</p>
+          </div>
+          <strong className="saved-stat">{formatMinutesSaved(secondsSaved)}</strong>
+        </div>
+        <hr/>
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
           <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>Your key stays on this device and is only used to analyse downloaded transcripts.</span></div>
+        <div className="key-note"><Sparkles size={15}/><span>Your key stays on this device and is used to check the connection and estimate ad breaks in downloads.</span></div>
         <label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a>
           <select value={model} onChange={e => setModel(e.target.value)}>
             <option value="google/gemini-2.5-flash">Gemini 2.5 Flash — recommended</option>
@@ -423,9 +607,12 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
           </select>
         </label>
         <div className="credit">
-          <span>OpenRouter credit</span>
-          <strong>{apiKey ? 'Connect to check balance' : 'Add your key to check balance'}</strong>
+          <span>OpenRouter status</span>
+          <strong>{keyStatus ? `Connected · ${formatCredits(keyStatus.limitRemaining)}` : apiKey ? 'Not checked yet' : 'Add your key to connect'}</strong>
         </div>
+        <button className="test-connection" onClick={() => void handleTestConnection()} disabled={testing || !apiKey.trim()}>
+          {testing ? 'Checking…' : 'Test connection'}
+        </button>
       </div>
       <button className="save-settings" onClick={onSave}>Save settings</button>
       <div className="settings-update">
