@@ -14,7 +14,7 @@ episode transcripts and skips them during playback.
 - Interactive transcript with clearly marked AI-detected advertisement ranges.
 - Local settings for automatic ad skipping and an OpenRouter API key/model choice.
 - OpenRouter connection test from Settings, plus local minutes-saved tracking.
-- Highlight ads on downloaded episodes; red markers on the progress bar and auto-skip during playback.
+- Highlight ads by transcribing downloaded audio with Whisper, then marking breaks on the progress bar and auto-skipping during playback.
 - Storybook design lab with desktop and mobile app stories.
 
 ## PWA notes
