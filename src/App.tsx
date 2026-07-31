@@ -107,9 +107,12 @@ function App() {
 
   useEffect(() => {
     adSegmentsRef.current = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
+  }, [activeEpisode, adSegmentsByEpisode])
+
+  useEffect(() => {
     skippedAdKeysRef.current = new Set()
     activeEpisodeIdRef.current = activeEpisode?.id ?? null
-  }, [activeEpisode, adSegmentsByEpisode])
+  }, [activeEpisode?.id])
 
   useEffect(() => {
     localStorage.setItem('podflow-followed-shows', JSON.stringify(followedShows))
@@ -187,11 +190,19 @@ function App() {
         if (!audio) return
         setAudioDuration(audio.duration)
         const resume = pendingResumeRef.current
+        let position = 0
         if (resume && resume.id === episode?.id && resume.position > 0 && resume.position < audio.duration) {
-          audio.currentTime = resume.position
-          setCurrentTime(resume.position)
+          position = resume.position
         }
         pendingResumeRef.current = null
+        if (skipAdsRef.current) {
+          const hit = adSegmentsRef.current.find((segment) => position >= segment.start && position < segment.end - 0.35)
+          if (hit) position = hit.end
+        }
+        if (position > 0) {
+          audio.currentTime = position
+          setCurrentTime(position)
+        }
       })
       audio.addEventListener('timeupdate', () => {
         if (!audio) return
@@ -313,10 +324,21 @@ function App() {
   }
   const seekTo = (time: number) => {
     let next = time
-    if (skipAds && activeEpisode) {
-      const segments = adSegmentsByEpisode[activeEpisode.id] ?? []
+    if (skipAdsRef.current && activeEpisode) {
+      const segments = adSegmentsRef.current.length
+        ? adSegmentsRef.current
+        : (adSegmentsByEpisode[activeEpisode.id] ?? [])
       const hit = segments.find((segment) => next >= segment.start && next < segment.end - 0.35)
-      if (hit) next = hit.end
+      if (hit) {
+        const skipped = Math.max(0, hit.end - next)
+        const skipKey = `${activeEpisode.id}:${hit.start}-${hit.end}`
+        next = hit.end
+        if (skipped > 0.5 && !skippedAdKeysRef.current.has(skipKey)) {
+          skippedAdKeysRef.current.add(skipKey)
+          setSecondsSaved((total) => total + skipped)
+          setToast(`Skipped ${formatMinutesSaved(skipped)} of ads`)
+        }
+      }
     }
     if (audioRef.current) audioRef.current.currentTime = next
     setCurrentTime(next)
@@ -458,17 +480,20 @@ function PlayerBar({ episode, playing, onPlay, currentTime, duration, onSeek, ad
     <div className="track">
       {expanded && <span>{formatTime(currentTime)}</span>}
       <div className="track-rail">
-        {duration > 0 && adSegments.map((segment) => (
-          <i
-            key={`${segment.start}-${segment.end}`}
-            className="ad-marker"
-            style={{
-              left: `${(segment.start / trackMax) * 100}%`,
-              width: `${(Math.max(segment.end - segment.start, 1) / trackMax) * 100}%`,
-            }}
-            title={segment.label ?? 'Ad segment'}
-          />
-        ))}
+        {duration > 0 && adSegments.map((segment) => {
+          const widthPct = Math.max(((segment.end - segment.start) / trackMax) * 100, 1.2)
+          return (
+            <i
+              key={`${segment.start}-${segment.end}`}
+              className="ad-marker"
+              style={{
+                left: `${(segment.start / trackMax) * 100}%`,
+                width: `${widthPct}%`,
+              }}
+              title={segment.label ? `Ad: ${segment.label}` : 'Ad segment'}
+            />
+          )
+        })}
         <i className="progress-fill" style={{ width: `${Math.min(100, (currentTime / trackMax) * 100)}%` }} />
         <input aria-label="Playback progress" type="range" min="0" max={trackMax} step="0.1" value={Math.min(currentTime, trackMax)} onChange={e => onSeek(Number(e.target.value))}/>
       </div>

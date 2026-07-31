@@ -10,11 +10,12 @@
 .track-rail input[type=range]::-moz-range-track{background:transparent;height:4px;border:0}
 .track-rail input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;border-radius:50%;background:#345f59;border:0;margin-top:-4px}
 .track-rail input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#345f59;border:0}
-.ad-marker{position:absolute;top:50%;transform:translateY(-50%);height:6px;border-radius:999px;background:#d64545;z-index:1;pointer-events:none;min-width:3px;box-shadow:0 0 0 1px #fff8}
+.ad-marker{position:absolute;top:50%;transform:translateY(-50%);height:12px;border-radius:2px;background:#e03131;z-index:1;pointer-events:none;min-width:6px;box-shadow:inset 0 0 0 1px #ffffff55}
 .progress-fill{position:absolute;left:0;top:50%;transform:translateY(-50%);height:4px;border-radius:999px;background:#345f59;z-index:0;pointer-events:none;max-width:100%}
 .player-progress-slim{width:100%;padding:0 0 6px}
 .player-progress-slim .track{max-width:none;width:100%;gap:0}
-.player-progress-slim .track-rail{height:14px}
+.player-progress-slim .track-rail{height:16px}
+.player-progress-slim .ad-marker{height:10px}
 .detect-ads{margin-top:8px;display:inline-flex;align-items:center;gap:6px;background:#fff4f3;color:#a33b3b;border:1px solid #f0c7c4;border-radius:6px;padding:6px 9px;font-size:11px;font-weight:700}
 .detect-ads:disabled{opacity:.65;cursor:wait}
 .detect-ads.done{background:#f7fffb;color:#2f6f63;border-color:#c6ddd4}
