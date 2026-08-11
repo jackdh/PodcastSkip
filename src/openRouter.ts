@@ -204,26 +204,24 @@ async function transcribeChunk(
   return [{ start: offsetSeconds, end: offsetSeconds + CHUNK_SECONDS, text }]
 }
 
-export async function transcribeEpisodeAudio(options: {
+export async function transcribeEpisodeSamples(options: {
   apiKey: string
-  audioBlob: Blob
+  samples: Float32Array
   sttModel?: string
   onProgress?: (message: string) => void
 }): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
   const trimmed = options.apiKey.trim()
   if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
 
-  options.onProgress?.('Decoding downloaded audio…')
-  const samples = await decodeEpisodeAudio(options.audioBlob)
-  const durationSeconds = samples.length / 16000
+  const durationSeconds = options.samples.length / 16000
   if (durationSeconds < 15) throw new Error('This episode is too short to analyse for ads.')
 
-  const totalChunks = wavChunkCount(samples.length, 16000, CHUNK_SECONDS)
+  const totalChunks = wavChunkCount(options.samples.length, 16000, CHUNK_SECONDS)
   const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
   const cues: TranscriptCue[] = []
 
   for (let index = 0; index < totalChunks; index += 1) {
-    const chunk = encodeWavChunkAt(samples, index, 16000, CHUNK_SECONDS)
+    const chunk = encodeWavChunkAt(options.samples, index, 16000, CHUNK_SECONDS)
     if (!chunk) continue
     options.onProgress?.(`Transcribing audio ${index + 1}/${totalChunks}…`)
     const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, chunk.offsetSeconds, sttModel)
@@ -232,6 +230,22 @@ export async function transcribeEpisodeAudio(options: {
 
   if (!cues.length) throw new Error('Transcription returned no speech to analyse.')
   return { cues, durationSeconds }
+}
+
+export async function transcribeEpisodeAudio(options: {
+  apiKey: string
+  audioBlob: Blob
+  sttModel?: string
+  onProgress?: (message: string) => void
+}): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
+  options.onProgress?.('Decoding downloaded audio…')
+  const samples = await decodeEpisodeAudio(options.audioBlob)
+  return transcribeEpisodeSamples({
+    apiKey: options.apiKey,
+    samples,
+    sttModel: options.sttModel,
+    onProgress: options.onProgress,
+  })
 }
 
 export async function detectAdSegmentsFromTranscript(options: {
@@ -299,6 +313,35 @@ ${transcript}`
   return normalizeSegments(extractJsonObject(content), options.durationSeconds)
 }
 
+export async function detectAdSegmentsFromSamples(options: {
+  apiKey: string
+  model: string
+  title: string
+  show: string
+  description?: string
+  samples: Float32Array
+  sttModel?: string
+  onProgress?: (message: string) => void
+}): Promise<{ segments: AdSegment[]; cues: TranscriptCue[]; durationSeconds: number }> {
+  const { cues, durationSeconds } = await transcribeEpisodeSamples({
+    apiKey: options.apiKey,
+    samples: options.samples,
+    sttModel: options.sttModel,
+    onProgress: options.onProgress,
+  })
+  options.onProgress?.('Finding ad breaks in the transcript…')
+  const segments = await detectAdSegmentsFromTranscript({
+    apiKey: options.apiKey,
+    model: options.model,
+    title: options.title,
+    show: options.show,
+    description: options.description,
+    durationSeconds,
+    cues,
+  })
+  return { segments, cues, durationSeconds }
+}
+
 export async function detectAdSegmentsFromAudio(options: {
   apiKey: string
   model: string
@@ -309,22 +352,19 @@ export async function detectAdSegmentsFromAudio(options: {
   sttModel?: string
   onProgress?: (message: string) => void
 }): Promise<AdSegment[]> {
-  const { cues, durationSeconds } = await transcribeEpisodeAudio({
-    apiKey: options.apiKey,
-    audioBlob: options.audioBlob,
-    sttModel: options.sttModel,
-    onProgress: options.onProgress,
-  })
-  options.onProgress?.('Finding ad breaks in the transcript…')
-  return detectAdSegmentsFromTranscript({
+  options.onProgress?.('Decoding downloaded audio…')
+  const samples = await decodeEpisodeAudio(options.audioBlob)
+  const { segments } = await detectAdSegmentsFromSamples({
     apiKey: options.apiKey,
     model: options.model,
     title: options.title,
     show: options.show,
     description: options.description,
-    durationSeconds,
-    cues,
+    samples,
+    sttModel: options.sttModel,
+    onProgress: options.onProgress,
   })
+  return segments
 }
 
 export function formatCredits(value: number | null): string {

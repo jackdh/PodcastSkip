@@ -48,3 +48,18 @@ OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
 Production deployments should prefer a secure backend or user-owned key vault for
 key handling. Long episodes take several transcription requests and will use
 OpenRouter credits.
+
+## One-off real ad-detect harness (manual)
+
+Not wired into CI. Cloud agents (or you) can run a real podcast through the same
+Whisper → analysis pipeline and inspect a JSON report of cues + ad segments.
+
+```bash
+# Requires ffmpeg on PATH and an OpenRouter key with credits
+cp .env.example .env.local   # or export OPENROUTER_API_KEY=...
+npm run test:ad-detect -- --query "NPR Up First" --max-minutes 3
+```
+
+Defaults analyse only the first few minutes to limit spend. Report lands at
+`tmp/ad-detect-report.json` (and `/opt/cursor/artifacts/ad-detect-report.json`
+in Cursor cloud). Pass `--help` for flags (`--audio-url`, `--model`, `--out`).
