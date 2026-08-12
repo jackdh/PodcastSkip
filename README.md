@@ -20,7 +20,11 @@ episode transcripts and skips them during playback.
 ## PWA notes
 
 Use `npm run build` and `npm run preview` to exercise the production service worker.
-Force update in Settings checks for a new worker and reloads the app so installed clients are not stuck on an old build.
+Force update in Settings unregisters the service worker, clears the app-shell
+cache (downloaded episodes are kept), and reloads from the network. That is
+required for iOS Home Screen apps, which otherwise keep serving the old
+precache even after a reload. If the version date still does not change,
+fully quit the Home Screen app from the app switcher and reopen it.
 Offline listening requires downloading an episode while online first.
 
 ## Run locally
