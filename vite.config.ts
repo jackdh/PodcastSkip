@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { audioProxyPlugin } from './audioProxyPlugin.ts'
 
 const packageJson = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8')) as { version: string }
 
@@ -11,6 +12,7 @@ export default defineConfig({
     __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
   },
   plugins: [
+    audioProxyPlugin(),
     react(),
     ...(process.env.STORYBOOK ? [] : [VitePWA({
       registerType: 'autoUpdate',

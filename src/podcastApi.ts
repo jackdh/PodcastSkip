@@ -74,7 +74,6 @@ const episodeFromResult = (result: ItunesResult): Episode => ({
 
 export const playbackUrl = (episode: Episode) => {
   if (!episode.audioUrl) return undefined
-  if (import.meta.env.DEV || !episode.episodeId || !episode.showId) return episode.audioUrl
   return `/api/audio?source=${encodeURIComponent(episode.audioUrl)}`
 }
 

@@ -11,8 +11,8 @@ episode transcripts and skips them during playback.
 - Responsive desktop and mobile podcast listening interface.
 - Live Apple Podcasts catalog search, show episodes, and browser audio playback.
 - Same-origin Pages Function audio streaming and persistent Cache Storage downloads for offline listening.
-- Interactive transcript with clearly marked AI-detected advertisement ranges.
-- Local settings for automatic ad skipping and an OpenRouter API key/model choice.
+- Interactive, follow-along transcript: the current line scrolls into view, the spoken word is highlighted, and tapping a word jumps playback.
+- Local settings for automatic ad skipping, analysis window (first N minutes), playback speed, and an OpenRouter API key/model choice.
 - OpenRouter connection test from Settings, plus local minutes-saved tracking.
 - Highlight ads by transcribing downloaded audio with Whisper, then marking breaks on the progress bar and auto-skipping during playback.
 - Storybook design lab with desktop and mobile app stories.
@@ -42,9 +42,35 @@ API-key storage stays client-local. Settings can verify the key against
 OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
 
 1. Sends the cached episode audio to OpenRouter speech-to-text (`openai/whisper-1`)
-   in short chunks with timed transcript segments.
-2. Asks your chosen analysis model to mark advertisement ranges from that transcript.
+   in short chunks with timed transcript segments. Settings can limit this to the
+   first N minutes (default 8) so a phone test does not transcribe a full episode.
+2. Asks your chosen analysis model to mark advertisement ranges from numbered
+   transcript cues (not free-form clocks).
+3. Stores cues + ad ranges on the device. Open now playing to follow the
+   transcript as it plays; tap a word to jump. Downloads lists each marked
+   range with a short excerpt.
+
+Local `npm run dev` and `npm run preview` proxy publisher audio through
+`/api/audio` (same rules as the Cloudflare Pages Function) so downloads and
+Highlight ads work off production.
 
 Production deployments should prefer a secure backend or user-owned key vault for
 key handling. Long episodes take several transcription requests and will use
 OpenRouter credits.
+
+## One-off real ad-detect harness (manual)
+
+Not wired into CI. Cloud agents (or you) can run a real podcast through the same
+Whisper → analysis pipeline and inspect a JSON report of cues + ad segments.
+
+```bash
+# Requires ffmpeg on PATH and an OpenRouter key with credits
+cp .env.example .env.local   # or export OPENROUTER_API_KEY=...
+npm run test:ad-detect -- --query "NPR Up First" --max-minutes 3
+```
+
+Defaults analyse only the first few minutes to limit spend. Report lands at
+`tmp/ad-detect-report.json` (and `/opt/cursor/artifacts/ad-detect-report.json`
+in Cursor cloud). Each predicted ad includes a short transcript excerpt
+(`before` / `during` / `after`) so you can judge false positives without
+dumping the whole file. Pass `--help` for flags (`--audio-url`, `--model`, `--out`).

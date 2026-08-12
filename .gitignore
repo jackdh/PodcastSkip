@@ -2,5 +2,9 @@ node_modules
 dist
 storybook-static
 *.local
+.env
+.tmp
+tmp
 *.tsbuildinfo
 .DS_Store
+/opt/cursor/artifacts/ad-detect-report.json
