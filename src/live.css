@@ -51,6 +51,43 @@
 .player-bar-body .skip-control{position:relative;width:40px;height:40px;color:#2a3640;display:grid;place-items:center}
 .player-bar-body .skip-control span{position:absolute;inset:0;display:grid;place-items:center;font:600 10px/1 'DM Mono',monospace;letter-spacing:-.04em;pointer-events:none}
 .player-bar.expanded{padding-bottom:12px;max-height:min(72vh,680px);overflow:auto}
+.now-playing{position:fixed;inset:0;z-index:30;background:#f6f7f4;display:flex;flex-direction:column;padding:calc(8px + env(safe-area-inset-top)) 16px calc(14px + env(safe-area-inset-bottom));gap:10px}
+.now-playing-head{position:relative;display:flex;align-items:center;justify-content:center;min-height:44px;flex:none}
+.now-playing-head span{font:700 11px/1 'DM Sans',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#7a858f;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.now-playing-collapse{position:absolute;left:0;top:50%;transform:translateY(-50%);width:40px;height:40px;display:grid;place-items:center;color:#2a3640}
+.now-playing-collapse .chevron-up{transform:rotate(180deg)}
+.now-playing>.art{align-self:center;width:84px;height:84px;border-radius:16px;margin:2px 0 4px;flex:none}
+.now-playing>.art.large{width:min(48vw,220px);height:min(48vw,220px);margin:8px 0 10px}
+.now-playing-copy{text-align:center;min-width:0}
+.now-playing-copy h2{font:600 20px/1.25 Fraunces,serif;letter-spacing:-.5px;margin:0 0 4px;color:#172033}
+.now-playing-copy p{margin:0;font-size:13px;color:#7b8690}
+.now-playing .track{width:100%;max-width:none;display:flex;align-items:center;gap:10px}
+.now-playing .track-rail{flex:1}
+.now-playing .track span{font:11px 'DM Mono';color:#7c8790;flex:none}
+.now-playing .controls{display:flex;align-items:center;justify-content:center;gap:42px;padding:4px 0}
+.now-playing .controls .player-play{width:64px;height:64px;background:#192738;color:#fff;border-radius:50%;display:grid;place-items:center;flex:none}
+.now-playing .skip-control{position:relative;width:44px;height:44px;color:#2a3640;display:grid;place-items:center}
+.now-playing .skip-control span{position:absolute;inset:0;display:grid;place-items:center;font:600 10px/1 'DM Mono',monospace;letter-spacing:-.04em;pointer-events:none}
+.ad-caption{margin:0;text-align:center;font-size:11px;color:#7a858f}
+.player-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+.player-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #d5ddd8;background:#fff;color:#2a3a34;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:700}
+.player-chip.on{background:#e8f6f0;color:#1f6b5c;border-color:#b7d8cc}
+.player-chip.ad{background:#fff4f3;color:#a33b3b;border-color:#f0c7c4}
+.player-chip:disabled{opacity:.65}
+.transcript-empty{margin:0;padding:18px 16px;text-align:center;color:#6f7b84;font-size:13px;line-height:1.5;background:#fff;border:1px dashed #dbe1dc;border-radius:12px}
+.now-playing .player-transcript{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;margin:0}
+.now-playing .transcript-list{flex:1;max-height:none;overflow:auto;-webkit-overflow-scrolling:touch}
+.now-playing .transcript-line{display:grid;grid-template-columns:46px 1fr;gap:8px;width:100%;text-align:left;padding:10px 14px;align-items:start}
+.now-playing .transcript-line p{margin:0;max-width:none;line-height:1.7}
+.ad-inline{font:700 10px/1.7 'DM Mono',monospace;letter-spacing:.4px;color:#ae741d}
+.transcript-word{display:inline;margin:0 3px 0 0;padding:0 1px;border-radius:3px;font:inherit;line-height:inherit;color:inherit;vertical-align:baseline}
+.transcript-word.current{background:#dfff45;color:#101827}
+.toast{z-index:40}
+@media(max-width:800px){
+  header .icon-button,header .avatar.small{display:none}
+  .now-playing .transcript-line{grid-template-columns:40px 1fr;padding-inline:12px}
+  .player-transcript .skip-line{display:flex}
+}
 .player-transcript{margin-top:2px}
 .player-transcript .transcript-list{max-height:min(240px,32vh);overflow:auto}
 .player-transcript .transcript-line{width:100%;text-align:left}

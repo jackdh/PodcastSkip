@@ -11,8 +11,8 @@ episode transcripts and skips them during playback.
 - Responsive desktop and mobile podcast listening interface.
 - Live Apple Podcasts catalog search, show episodes, and browser audio playback.
 - Same-origin Pages Function audio streaming and persistent Cache Storage downloads for offline listening.
-- Interactive transcript with clearly marked AI-detected advertisement ranges.
-- Local settings for automatic ad skipping, analysis window (first N minutes), and an OpenRouter API key/model choice.
+- Interactive, follow-along transcript: the current line scrolls into view, the spoken word is highlighted, and tapping a word jumps playback.
+- Local settings for automatic ad skipping, analysis window (first N minutes), playback speed, and an OpenRouter API key/model choice.
 - OpenRouter connection test from Settings, plus local minutes-saved tracking.
 - Highlight ads by transcribing downloaded audio with Whisper, then marking breaks on the progress bar and auto-skipping during playback.
 - Storybook design lab with desktop and mobile app stories.
@@ -46,8 +46,13 @@ OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
    first N minutes (default 8) so a phone test does not transcribe a full episode.
 2. Asks your chosen analysis model to mark advertisement ranges from numbered
    transcript cues (not free-form clocks).
-3. Stores cues + ad ranges on the device. Expand the player to review the
-   transcript; Downloads lists each marked range with a short excerpt.
+3. Stores cues + ad ranges on the device. Open now playing to follow the
+   transcript as it plays; tap a word to jump. Downloads lists each marked
+   range with a short excerpt.
+
+Local `npm run dev` and `npm run preview` proxy publisher audio through
+`/api/audio` (same rules as the Cloudflare Pages Function) so downloads and
+Highlight ads work off production.
 
 Production deployments should prefer a secure backend or user-owned key vault for
 key handling. Long episodes take several transcription requests and will use
