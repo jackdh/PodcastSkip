@@ -15,7 +15,7 @@ import {
   type KeyStatus,
   type TranscriptCue,
 } from './openRouter'
-import { forceAppUpdate } from './pwa'
+import { DOWNLOAD_CACHE_NAME, forceAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
 
 type AdSegmentMap = Record<string, AdSegment[]>
@@ -23,7 +23,7 @@ type CueMap = Record<string, TranscriptCue[]>
 const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 0] as const
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
-const downloadCacheName = 'podflow-downloads-v1'
+const downloadCacheName = DOWNLOAD_CACHE_NAME
 
 function Art({ artwork, label, large = false }: { artwork?: string; label: string; large?: boolean }) {
   return <div className={`art lime ${large ? 'large' : ''}`}>{artwork ? <img src={artwork} alt="" /> : <><span>{label.slice(0, 2).toUpperCase()}</span><i /></>}</div>
@@ -585,7 +585,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
   const handleForceUpdate = async () => {
     if (updating) return
     setUpdating(true)
-    onToast('Checking for updates…')
+    onToast('Reloading a fresh copy…')
     try {
       await forceAppUpdate()
     } catch {
@@ -665,6 +665,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
           {updating ? 'Updating…' : 'Force update'}
         </button>
         <p className="app-version">Version {__APP_VERSION__} · Updated {formatBuildDate(__BUILD_TIME__)}</p>
+        <p className="update-hint">Force update clears the app cache and reloads. Downloaded episodes stay. If the date still does not change on iPhone, swipe the Home Screen app away from the app switcher, reopen it, or delete the icon and add the site again.</p>
       </div>
     </div>
   )

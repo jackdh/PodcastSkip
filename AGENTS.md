@@ -17,3 +17,4 @@ Git / deploy workflow:
 Non-obvious caveats:
 - `npm run lint` currently fails: the `lint` script runs `eslint .` but the repo ships no `eslint.config.js` (ESLint 10 requires flat config). This is a pre-existing repo gap, unrelated to environment setup.
 - `vite.config.ts` disables the PWA plugin when the `STORYBOOK` env var is truthy (Storybook sets it) to avoid service-worker conflicts. To test PWA/service-worker behavior, use `npm run build` + `npm run preview`, not the Storybook flow.
+- iOS Home Screen apps keep their own service worker. Force update must unregister it and cache-bust; a normal reload still serves the old precache.
