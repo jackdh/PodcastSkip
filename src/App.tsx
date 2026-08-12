@@ -11,6 +11,9 @@ import {
   excerptAroundSegment,
   formatCredits,
   formatMinutesSaved,
+  DEFAULT_ANALYSIS_MODEL,
+  DEFAULT_STT_MODEL,
+  QWEN_STT_MODEL,
   type AdSegment,
   type KeyStatus,
 } from './openRouter'
@@ -49,7 +52,8 @@ function App() {
   const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [skipAds, setSkipAds] = useState(true)
   const [apiKey, setApiKey] = useState('')
-  const [model, setModel] = useState('google/gemini-2.5-flash')
+  const [model, setModel] = useState(DEFAULT_ANALYSIS_MODEL)
+  const [sttModel, setSttModel] = useState(DEFAULT_STT_MODEL)
   const [analyseMinutes, setAnalyseMinutes] = useState(8)
   const [playbackRate, setPlaybackRate] = useState(1)
   const [toast, setToast] = useState('')
@@ -87,7 +91,8 @@ function App() {
     if (saved) {
       const parsed = JSON.parse(saved)
       setSkipAds(parsed.skipAds ?? true)
-      setModel(parsed.model ?? 'google/gemini-2.5-flash')
+      setModel(parsed.model ?? DEFAULT_ANALYSIS_MODEL)
+      setSttModel(parsed.sttModel ?? DEFAULT_STT_MODEL)
       setApiKey(parsed.apiKey ?? '')
       const minutes = Number(parsed.analyseMinutes)
       setAnalyseMinutes(Number.isFinite(minutes) ? minutes : 8)
@@ -106,8 +111,8 @@ function App() {
 
   useEffect(() => {
     if (!settingsReady) return
-    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey, analyseMinutes, playbackRate }))
-  }, [settingsReady, skipAds, model, apiKey, analyseMinutes, playbackRate])
+    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
+  }, [settingsReady, skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate])
 
   useEffect(() => {
     localStorage.setItem('podflow-downloads', JSON.stringify(downloadedEpisodes))
@@ -423,14 +428,14 @@ function App() {
     setToast(isFollowed ? `Unfollowed ${show.name}` : `Following ${show.name}`)
   }
   const saveSettings = () => {
-    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey, analyseMinutes, playbackRate }))
+    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
     setToast('Ad skip settings saved')
   }
   const testOpenRouterConnection = async () => {
     try {
       const status = await checkOpenRouterKey(apiKey)
       setKeyStatus(status)
-      localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, apiKey, analyseMinutes, playbackRate }))
+      localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
       setToast(`Connected to OpenRouter · ${formatCredits(status.limitRemaining)}`)
     } catch (error) {
       setKeyStatus(null)
@@ -461,6 +466,7 @@ function App() {
       const { segments, cues } = await detectAdSegmentsFromAudio({
         apiKey,
         model,
+        sttModel,
         title: episode.title,
         show: episode.show,
         description: episode.description,
@@ -524,7 +530,7 @@ function App() {
       {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} search="" timeline timelineStatus={timelineStatus} activeEpisodeId={activeEpisode?.id} />}
       {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved} activeEpisodeId={activeEpisode?.id}/>}
-      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} skipAds={skipAds} setSkipAds={setSkipAds} analyseMinutes={analyseMinutes} setAnalyseMinutes={setAnalyseMinutes} onSave={saveSettings} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
+      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} sttModel={sttModel} setSttModel={setSttModel} skipAds={skipAds} setSkipAds={setSkipAds} analyseMinutes={analyseMinutes} setAnalyseMinutes={setAnalyseMinutes} onSave={saveSettings} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
     </section>
 
     <PlayerBar
@@ -602,7 +608,7 @@ function formatBuildDate(iso: string) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds, analyseMinutes, setAnalyseMinutes, onSave, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; analyseMinutes: number; setAnalyseMinutes: (v: number) => void; onSave: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
+function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttModel, skipAds, setSkipAds, analyseMinutes, setAnalyseMinutes, onSave, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; sttModel: string; setSttModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; analyseMinutes: number; setAnalyseMinutes: (v: number) => void; onSave: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
   const [updating, setUpdating] = useState(false)
   const [testing, setTesting] = useState(false)
 
@@ -657,10 +663,17 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
           <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>1. Paste your key. 2. Download an episode. 3. Highlight ads transcribes that audio with Whisper — we never use a publisher transcript URL, because those leave ads out. 4. Play: red marks skip, and the words follow along.</span></div>
+        <div className="key-note"><Sparkles size={15}/><span>1. Paste your key. 2. Download an episode. 3. Highlight ads transcribes that audio — we never use a publisher transcript URL, because those leave ads out. 4. Play: red marks skip, and the words follow along.</span></div>
+        <label>Speech-to-text
+          <select value={sttModel} onChange={e => setSttModel(e.target.value)}>
+            <option value={DEFAULT_STT_MODEL}>Whisper — timed cues (recommended)</option>
+            <option value={QWEN_STT_MODEL}>Qwen3 ASR Flash — often clearer ads, 15s clocks</option>
+          </select>
+        </label>
         <label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a>
           <select value={model} onChange={e => setModel(e.target.value)}>
-            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash — recommended</option>
+            <option value="deepseek/deepseek-v4-flash">DeepSeek V4 Flash — recommended</option>
+            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
             <option value="openai/gpt-4.1-mini">GPT-4.1 mini — precise</option>
             <option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku — nuanced</option>
           </select>

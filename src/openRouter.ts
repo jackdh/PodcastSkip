@@ -50,8 +50,9 @@ type TranscriptionResponse = {
   error?: { message?: string }
 }
 
-const DEFAULT_STT_MODEL = 'openai/whisper-1'
+export const DEFAULT_STT_MODEL = 'openai/whisper-1'
 export const QWEN_STT_MODEL = 'qwen/qwen3-asr-flash-2026-02-10'
+export const DEFAULT_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash'
 export const DEEPSEEK_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash'
 const WHISPER_CHUNK_SECONDS = 45
 const UNTIMED_STT_CHUNK_SECONDS = 15

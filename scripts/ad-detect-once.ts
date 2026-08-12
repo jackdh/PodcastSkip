@@ -26,7 +26,7 @@ import { searchCatalog, type Episode } from '../src/podcastApi.ts'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = resolve(__dirname, '..')
 const SAMPLE_RATE = 16_000
-const DEFAULT_MODEL = 'google/gemini-2.5-flash'
+const DEFAULT_MODEL = 'deepseek/deepseek-v4-flash'
 const DEFAULT_MAX_MINUTES = 3
 const DEFAULT_QUERY = 'NPR Up First'
 
