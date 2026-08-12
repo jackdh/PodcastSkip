@@ -2,7 +2,7 @@
 
 ## Cursor Cloud specific instructions
 
-Podflow is a React 19 + Vite PWA (package name `podcastskip`) deployed through Cloudflare Pages. `functions/api/audio.js` is a Pages Function that streams a selected publisher audio URL through the same origin. It accepts only public HTTPS URLs and audio/octet-stream responses, then supports range requests for playback and Cache Storage downloads. The app queries the public Apple Podcasts Search API directly for catalog metadata. OpenRouter is wired for real ad detection: Settings stores the key/model in `localStorage`, Downloads → Highlight ads runs Whisper STT then an analysis chat model, and the player skips marked ranges when the toggle is on.
+Podflow is a React 19 + Vite PWA (package name `podcastskip`) deployed through Cloudflare Pages. `functions/api/audio.js` is a Pages Function that streams a selected publisher audio URL through the same origin. It accepts only public HTTPS URLs and audio/octet-stream responses, then supports range requests for playback and Cache Storage downloads. The app queries the public Apple Podcasts Search API directly for catalog metadata. OpenRouter is wired for real ad detection: Settings stores the key/model/analysis-window in `localStorage`, Downloads → Highlight ads runs Whisper STT (optionally first N minutes) then an analysis chat model on numbered transcript cues, and the player skips marked ranges when the toggle is on. Expand the player to review the transcript; Downloads shows marked ranges with excerpts.
 
 Commands are defined in `package.json` and documented in `README.md`:
 - Dev server: `npm run dev` (Vite on `http://localhost:5173`).

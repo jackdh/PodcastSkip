@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import {
   checkOpenRouterKey,
   detectAdSegmentsFromSamples,
+  excerptAroundSegment,
   formatCredits,
   type AdSegment,
   type TranscriptCue,
@@ -190,12 +191,29 @@ function pickEpisode(episodes: Episode[]): Episode {
   return scored[0]
 }
 
-function summarizeSegments(segments: AdSegment[]) {
-  return segments.map((segment) => ({
-    ...segment,
-    clock: `${formatClock(segment.start)}–${formatClock(segment.end)}`,
-    durationSeconds: Number((segment.end - segment.start).toFixed(1)),
+function summarizeCues(cues: TranscriptCue[]) {
+  return cues.map((cue) => ({
+    start: Number(cue.start.toFixed(2)),
+    end: Number(cue.end.toFixed(2)),
+    clock: `${formatClock(cue.start)}–${formatClock(cue.end)}`,
+    text: cue.text,
   }))
+}
+
+function summarizeSegments(segments: AdSegment[], cues: TranscriptCue[]) {
+  return segments.map((segment) => {
+    const excerpt = excerptAroundSegment(cues, segment.start, segment.end)
+    return {
+      ...segment,
+      clock: `${formatClock(segment.start)}–${formatClock(segment.end)}`,
+      durationSeconds: Number((segment.end - segment.start).toFixed(1)),
+      excerpt: {
+        before: summarizeCues(excerpt.before),
+        during: summarizeCues(excerpt.during),
+        after: summarizeCues(excerpt.after),
+      },
+    }
+  })
 }
 
 async function main() {
@@ -288,13 +306,8 @@ async function main() {
         before: keyBefore,
         after: keyAfter,
       },
-      segments: summarizeSegments(segments),
-      cues: cues.map((cue: TranscriptCue) => ({
-        start: cue.start,
-        end: cue.end,
-        clock: `${formatClock(cue.start)}–${formatClock(cue.end)}`,
-        text: cue.text,
-      })),
+      segments: summarizeSegments(segments, cues),
+      cues: summarizeCues(cues),
     }
 
     await mkdir(dirname(args.out), { recursive: true })
@@ -315,6 +328,10 @@ async function main() {
     console.log(`Ad segments: ${segments.length}`)
     for (const segment of report.segments) {
       console.log(`- ${segment.clock} (${segment.durationSeconds}s)${segment.label ? ` · ${segment.label}` : ''}`)
+      const during = segment.excerpt.during.map((cue) => cue.text.trim()).join(' ')
+      if (during) console.log(`  during: ${during.slice(0, 220)}${during.length > 220 ? '…' : ''}`)
+      const after = segment.excerpt.after[0]
+      if (after) console.log(`  next: ${after.clock} ${after.text.trim().slice(0, 120)}`)
     }
     if (!segments.length) console.log('- (none found in analysed window)')
     console.log(`Report: ${args.out}`)

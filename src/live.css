@@ -50,7 +50,16 @@
 .player-bar-body .controls .player-play{width:58px;height:58px}
 .player-bar-body .skip-control{position:relative;width:40px;height:40px;color:#2a3640;display:grid;place-items:center}
 .player-bar-body .skip-control span{position:absolute;inset:0;display:grid;place-items:center;font:600 10px/1 'DM Mono',monospace;letter-spacing:-.04em;pointer-events:none}
-.player-bar.expanded{padding-bottom:12px}
+.player-bar.expanded{padding-bottom:12px;max-height:min(72vh,680px);overflow:auto}
+.player-transcript{margin-top:2px}
+.player-transcript .transcript-list{max-height:min(240px,32vh);overflow:auto}
+.player-transcript .transcript-line{width:100%;text-align:left}
+.player-transcript .transcript-line p{margin-top:2px}
+.ad-range-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:8px}
+.ad-range-list li{background:#fff8e9;border:1px solid #f0e0b8;border-radius:6px;padding:8px 9px;font-size:11px;color:#6d5a2c}
+.ad-range-list b{color:#875713}
+.ad-range-list p{margin:4px 0 0;color:#6f6758;line-height:1.4;white-space:normal}
+@media(max-width:800px){.player-transcript .skip-line{display:flex}}
 @keyframes player-expand{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:800px){.player-bar.expanded{padding-bottom:calc(10px + env(safe-area-inset-bottom))}.content{padding-bottom:calc(125px + env(safe-area-inset-bottom))}}
 @keyframes player-modal-in{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}

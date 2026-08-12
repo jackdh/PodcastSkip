@@ -12,7 +12,7 @@ episode transcripts and skips them during playback.
 - Live Apple Podcasts catalog search, show episodes, and browser audio playback.
 - Same-origin Pages Function audio streaming and persistent Cache Storage downloads for offline listening.
 - Interactive transcript with clearly marked AI-detected advertisement ranges.
-- Local settings for automatic ad skipping and an OpenRouter API key/model choice.
+- Local settings for automatic ad skipping, analysis window (first N minutes), and an OpenRouter API key/model choice.
 - OpenRouter connection test from Settings, plus local minutes-saved tracking.
 - Highlight ads by transcribing downloaded audio with Whisper, then marking breaks on the progress bar and auto-skipping during playback.
 - Storybook design lab with desktop and mobile app stories.
@@ -42,8 +42,12 @@ API-key storage stays client-local. Settings can verify the key against
 OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
 
 1. Sends the cached episode audio to OpenRouter speech-to-text (`openai/whisper-1`)
-   in short chunks with timed transcript segments.
-2. Asks your chosen analysis model to mark advertisement ranges from that transcript.
+   in short chunks with timed transcript segments. Settings can limit this to the
+   first N minutes (default 8) so a phone test does not transcribe a full episode.
+2. Asks your chosen analysis model to mark advertisement ranges from numbered
+   transcript cues (not free-form clocks).
+3. Stores cues + ad ranges on the device. Expand the player to review the
+   transcript; Downloads lists each marked range with a short excerpt.
 
 Production deployments should prefer a secure backend or user-owned key vault for
 key handling. Long episodes take several transcription requests and will use
@@ -62,4 +66,6 @@ npm run test:ad-detect -- --query "NPR Up First" --max-minutes 3
 
 Defaults analyse only the first few minutes to limit spend. Report lands at
 `tmp/ad-detect-report.json` (and `/opt/cursor/artifacts/ad-detect-report.json`
-in Cursor cloud). Pass `--help` for flags (`--audio-url`, `--model`, `--out`).
+in Cursor cloud). Each predicted ad includes a short transcript excerpt
+(`before` / `during` / `after`) so you can judge false positives without
+dumping the whole file. Pass `--help` for flags (`--audio-url`, `--model`, `--out`).

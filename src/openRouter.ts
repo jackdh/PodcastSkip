@@ -95,7 +95,59 @@ function extractJsonObject(text: string): unknown {
   }
 }
 
-function normalizeSegments(raw: unknown, durationSeconds: number): AdSegment[] {
+function cueIndexFromRaw(raw: unknown, cueCount: number): number | undefined {
+  const value = Number(raw)
+  if (!Number.isInteger(value)) return undefined
+  // Prompt uses 1-based #ids. Accept 0-based only when the value cannot be 1-based.
+  if (value >= 1 && value <= cueCount) return value - 1
+  if (value === 0) return 0
+  return undefined
+}
+
+function segmentFromCueRange(
+  startIndex: number,
+  endIndex: number,
+  cues: TranscriptCue[],
+  label?: string,
+): AdSegment | null {
+  if (startIndex < 0 || endIndex < startIndex || endIndex >= cues.length) return null
+  const start = cues[startIndex].start
+  const end = cues[endIndex].end
+  if (!(end > start)) return null
+  return { start, end, label }
+}
+
+function segmentFromSeconds(
+  start: number,
+  end: number,
+  durationSeconds: number,
+  cues: TranscriptCue[],
+  label?: string,
+): AdSegment | null {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+  if (!cues.length) {
+    const clampedStart = Math.max(0, Math.min(start, durationSeconds))
+    const clampedEnd = Math.max(clampedStart + 1, Math.min(end, durationSeconds))
+    if (clampedEnd - clampedStart < 2) return null
+    return { start: clampedStart, end: clampedEnd, label }
+  }
+
+  const overlapping = cues
+    .map((cue, index) => ({ cue, index }))
+    .filter(({ cue }) => cue.start < end && cue.end > start)
+  if (!overlapping.length) return null
+
+  // Prefer cues whose midpoint sits inside the predicted range so a slightly
+  // long end time does not swallow the first news sentence after an ad.
+  const interior = overlapping.filter(({ cue }) => {
+    const mid = (cue.start + cue.end) / 2
+    return mid >= start && mid <= end
+  })
+  const chosen = interior.length ? interior : overlapping
+  return segmentFromCueRange(chosen[0].index, chosen[chosen.length - 1].index, cues, label)
+}
+
+function normalizeSegments(raw: unknown, durationSeconds: number, cues: TranscriptCue[] = []): AdSegment[] {
   const list = Array.isArray(raw)
     ? raw
     : raw && typeof raw === 'object' && Array.isArray((raw as { segments?: unknown }).segments)
@@ -107,17 +159,27 @@ function normalizeSegments(raw: unknown, durationSeconds: number): AdSegment[] {
   for (const item of list) {
     if (!item || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
-    const start = Number(record.start ?? record.startSeconds ?? record.from)
-    const end = Number(record.end ?? record.endSeconds ?? record.to)
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue
-    const clampedStart = Math.max(0, Math.min(start, durationSeconds))
-    const clampedEnd = Math.max(clampedStart + 1, Math.min(end, durationSeconds))
+    const label = typeof record.label === 'string'
+      ? record.label
+      : typeof record.type === 'string' ? record.type : undefined
+    const startCue = cueIndexFromRaw(record.startCue ?? record.start_cue ?? record.fromCue, cues.length)
+    const endCue = cueIndexFromRaw(record.endCue ?? record.end_cue ?? record.toCue, cues.length)
+    const fromCues = startCue !== undefined && endCue !== undefined
+      ? segmentFromCueRange(startCue, endCue, cues, label)
+      : null
+    const fromSeconds = segmentFromSeconds(
+      Number(record.start ?? record.startSeconds ?? record.from),
+      Number(record.end ?? record.endSeconds ?? record.to),
+      durationSeconds,
+      cues,
+      label,
+    )
+    const segment = fromCues ?? fromSeconds
+    if (!segment || segment.end - segment.start < 2) continue
+    const clampedStart = Math.max(0, Math.min(segment.start, durationSeconds))
+    const clampedEnd = Math.max(clampedStart + 1, Math.min(segment.end, durationSeconds))
     if (clampedEnd - clampedStart < 2) continue
-    segments.push({
-      start: clampedStart,
-      end: clampedEnd,
-      label: typeof record.label === 'string' ? record.label : typeof record.type === 'string' ? record.type : undefined,
-    })
+    segments.push({ start: clampedStart, end: clampedEnd, label: segment.label })
   }
   return mergeOverlappingSegments(segments.sort((a, b) => a.start - b.start))
 }
@@ -147,9 +209,25 @@ function formatCueClock(seconds: number): string {
 
 function formatTranscriptForPrompt(cues: TranscriptCue[]): string {
   return cues
-    .map((cue) => `[${formatCueClock(cue.start)}-${formatCueClock(cue.end)}] ${cue.text.trim()}`)
-    .filter((line) => line.length > 12)
+    .map((cue, index) => `#${index + 1} [${formatCueClock(cue.start)}-${formatCueClock(cue.end)}] ${cue.text.trim()}`)
     .join('\n')
+}
+
+export function cuesOverlappingRange(cues: TranscriptCue[], start: number, end: number): TranscriptCue[] {
+  return cues.filter((cue) => cue.start < end && cue.end > start)
+}
+
+export function excerptAroundSegment(
+  cues: TranscriptCue[],
+  start: number,
+  end: number,
+  padSeconds = 12,
+): { before: TranscriptCue[]; during: TranscriptCue[]; after: TranscriptCue[] } {
+  return {
+    before: cuesOverlappingRange(cues, Math.max(0, start - padSeconds), start),
+    during: cuesOverlappingRange(cues, start, end),
+    after: cuesOverlappingRange(cues, end, end + padSeconds),
+  }
 }
 
 async function transcribeChunk(
@@ -208,20 +286,27 @@ export async function transcribeEpisodeSamples(options: {
   apiKey: string
   samples: Float32Array
   sttModel?: string
+  maxMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
   const trimmed = options.apiKey.trim()
   if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
 
-  const durationSeconds = options.samples.length / 16000
+  let samples = options.samples
+  if (options.maxMinutes && options.maxMinutes > 0) {
+    const maxSamples = Math.floor(options.maxMinutes * 60 * 16000)
+    if (samples.length > maxSamples) samples = samples.subarray(0, maxSamples)
+  }
+
+  const durationSeconds = samples.length / 16000
   if (durationSeconds < 15) throw new Error('This episode is too short to analyse for ads.')
 
-  const totalChunks = wavChunkCount(options.samples.length, 16000, CHUNK_SECONDS)
+  const totalChunks = wavChunkCount(samples.length, 16000, CHUNK_SECONDS)
   const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
   const cues: TranscriptCue[] = []
 
   for (let index = 0; index < totalChunks; index += 1) {
-    const chunk = encodeWavChunkAt(options.samples, index, 16000, CHUNK_SECONDS)
+    const chunk = encodeWavChunkAt(samples, index, 16000, CHUNK_SECONDS)
     if (!chunk) continue
     options.onProgress?.(`Transcribing audio ${index + 1}/${totalChunks}…`)
     const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, chunk.offsetSeconds, sttModel)
@@ -236,6 +321,7 @@ export async function transcribeEpisodeAudio(options: {
   apiKey: string
   audioBlob: Blob
   sttModel?: string
+  maxMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
   options.onProgress?.('Decoding downloaded audio…')
@@ -244,6 +330,7 @@ export async function transcribeEpisodeAudio(options: {
     apiKey: options.apiKey,
     samples,
     sttModel: options.sttModel,
+    maxMinutes: options.maxMinutes,
     onProgress: options.onProgress,
   })
 }
@@ -262,24 +349,26 @@ export async function detectAdSegmentsFromTranscript(options: {
   if (!options.cues.length) throw new Error('No transcript available for ad detection.')
 
   const transcript = formatTranscriptForPrompt(options.cues).slice(0, 100_000)
-  const prompt = `You are analysing a timed podcast transcript to find advertisement and sponsor-read segments.
+  const lastCueId = options.cues.length
+  const prompt = `You are analysing a numbered podcast transcript to find advertisement and sponsor-read segments.
 
 Return ONLY JSON:
-{"segments":[{"start":12.5,"end":67.0,"label":"sponsor read"}]}
+{"segments":[{"startCue":13,"endCue":19,"label":"sponsor reads"}]}
 
 Rules:
-- start/end are seconds from episode start
-- episode length is ${options.durationSeconds.toFixed(1)} seconds
-- Use the transcript timestamps; do not invent times outside spoken cues
-- Mark host-read ads, sponsored messages, network ads, "this show is brought to you by", discount codes, and similar commercial reads
-- Do NOT mark show intros/outros that are not selling something
-- Merge contiguous ad copy into one segment
+- startCue and endCue are inclusive cue ids from the # numbers below (1 through ${lastCueId})
+- Do not invent ids or timestamps; copy ids from the transcript
+- Mark host-read ads, network ads, "this message comes from", "this show is brought to you by", "NPR sponsor", discount codes, product URLs, and the legal disclaimer that closes an ad
+- Do NOT mark show intros/outros, headlines, or news/host copy that is not selling something
+- Stop at the last commercial sentence. The first cue that returns to the story/news is NOT part of the ad
+- Merge contiguous commercial cues into one segment
 - If unsure, omit the segment
 - If none found, return {"segments":[]}
 
 Show: ${options.show}
 Title: ${options.title}
 Description: ${(options.description ?? '').slice(0, 1200)}
+Analysed duration: ${options.durationSeconds.toFixed(1)} seconds
 
 Transcript:
 ${transcript}`
@@ -292,7 +381,7 @@ ${transcript}`
       temperature: 0.1,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'You detect podcast advertisements from timed transcripts. Reply with JSON only.' },
+        { role: 'system', content: 'You detect podcast advertisements from numbered transcript cues. Reply with JSON only using startCue/endCue ids.' },
         { role: 'user', content: prompt },
       ],
     }),
@@ -310,7 +399,7 @@ ${transcript}`
   const content = payload.choices?.[0]?.message?.content
   if (!content) throw new Error('OpenRouter returned an empty response.')
 
-  return normalizeSegments(extractJsonObject(content), options.durationSeconds)
+  return normalizeSegments(extractJsonObject(content), options.durationSeconds, options.cues)
 }
 
 export async function detectAdSegmentsFromSamples(options: {
@@ -321,12 +410,14 @@ export async function detectAdSegmentsFromSamples(options: {
   description?: string
   samples: Float32Array
   sttModel?: string
+  maxMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ segments: AdSegment[]; cues: TranscriptCue[]; durationSeconds: number }> {
   const { cues, durationSeconds } = await transcribeEpisodeSamples({
     apiKey: options.apiKey,
     samples: options.samples,
     sttModel: options.sttModel,
+    maxMinutes: options.maxMinutes,
     onProgress: options.onProgress,
   })
   options.onProgress?.('Finding ad breaks in the transcript…')
@@ -350,11 +441,12 @@ export async function detectAdSegmentsFromAudio(options: {
   description?: string
   audioBlob: Blob
   sttModel?: string
+  maxMinutes?: number
   onProgress?: (message: string) => void
-}): Promise<AdSegment[]> {
+}): Promise<{ segments: AdSegment[]; cues: TranscriptCue[]; durationSeconds: number }> {
   options.onProgress?.('Decoding downloaded audio…')
   const samples = await decodeEpisodeAudio(options.audioBlob)
-  const { segments } = await detectAdSegmentsFromSamples({
+  return detectAdSegmentsFromSamples({
     apiKey: options.apiKey,
     model: options.model,
     title: options.title,
@@ -362,9 +454,9 @@ export async function detectAdSegmentsFromAudio(options: {
     description: options.description,
     samples,
     sttModel: options.sttModel,
+    maxMinutes: options.maxMinutes,
     onProgress: options.onProgress,
   })
-  return segments
 }
 
 export function formatCredits(value: number | null): string {
