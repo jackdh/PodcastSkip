@@ -80,7 +80,8 @@ npm run test:ad-detect -- --query "NPR Up First" --max-minutes 3
 
 Defaults analyse only the first few minutes to limit spend. Use
 `--start-minutes` to jump to a mid-roll (for example `--start-minutes 18
---max-minutes 4`). Report lands at `tmp/ad-detect-report.json` (and
+--max-minutes 4`). Pass `--stt-model qwen/qwen3-asr-flash-2026-02-10` and
+`--model deepseek/deepseek-v4-flash` to try Qwen ASR + DeepSeek for ads. Report lands at `tmp/ad-detect-report.json` (and
 `/opt/cursor/artifacts/ad-detect-report.json` in Cursor cloud). Each predicted
 ad includes a short transcript excerpt (`before` / `during` / `after`) so you
 can judge false positives without dumping the whole file. Pass `--help` for

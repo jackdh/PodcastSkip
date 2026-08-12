@@ -53,7 +53,8 @@ type TranscriptionResponse = {
 const DEFAULT_STT_MODEL = 'openai/whisper-1'
 export const QWEN_STT_MODEL = 'qwen/qwen3-asr-flash-2026-02-10'
 export const DEEPSEEK_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash'
-const CHUNK_SECONDS = 45
+const WHISPER_CHUNK_SECONDS = 45
+const UNTIMED_STT_CHUNK_SECONDS = 15
 
 const openRouterHeaders = (apiKey: string, contentType = 'application/json') => ({
   Authorization: `Bearer ${apiKey}`,
@@ -248,6 +249,10 @@ export function excerptAroundSegment(
   }
 }
 
+function sttChunkSeconds(sttModel: string) {
+  return /qwen/i.test(sttModel) && /asr/i.test(sttModel) ? UNTIMED_STT_CHUNK_SECONDS : WHISPER_CHUNK_SECONDS
+}
+
 function cueTime(value: unknown, fallbackUnit: 'seconds' | 'ms' = 'seconds'): number {
   const n = Number(value)
   if (!Number.isFinite(n)) return Number.NaN
@@ -279,6 +284,7 @@ async function transcribeChunk(
   apiKey: string,
   base64Wav: string,
   offsetSeconds: number,
+  chunkDurationSeconds: number,
   sttModel: string,
 ): Promise<TranscriptCue[]> {
   // Send the downloaded audio bytes. Never a publisher transcript URL or remote
@@ -323,7 +329,7 @@ async function transcribeChunk(
 
   const text = (payload.text ?? '').trim()
   if (!text) return []
-  return [{ start: offsetSeconds, end: offsetSeconds + CHUNK_SECONDS, text }]
+  return [{ start: offsetSeconds, end: offsetSeconds + Math.max(1, chunkDurationSeconds), text }]
 }
 
 export async function transcribeEpisodeSamples(options: {
@@ -352,15 +358,22 @@ export async function transcribeEpisodeSamples(options: {
   const durationSeconds = offsetSeconds + samples.length / 16000
   if (samples.length / 16000 < 15) throw new Error('This episode is too short to analyse for ads.')
 
-  const totalChunks = wavChunkCount(samples.length, 16000, CHUNK_SECONDS)
   const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
+  const chunkSeconds = sttChunkSeconds(sttModel)
+  const totalChunks = wavChunkCount(samples.length, 16000, chunkSeconds)
   const cues: TranscriptCue[] = []
 
   for (let index = 0; index < totalChunks; index += 1) {
-    const chunk = encodeWavChunkAt(samples, index, 16000, CHUNK_SECONDS)
+    const chunk = encodeWavChunkAt(samples, index, 16000, chunkSeconds)
     if (!chunk) continue
     options.onProgress?.(`Transcribing downloaded audio ${index + 1}/${totalChunks}…`)
-    const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, offsetSeconds + chunk.offsetSeconds, sttModel)
+    const chunkCues = await transcribeChunk(
+      trimmed,
+      chunk.base64Wav,
+      offsetSeconds + chunk.offsetSeconds,
+      chunk.durationSeconds,
+      sttModel,
+    )
     cues.push(...chunkCues)
   }
 

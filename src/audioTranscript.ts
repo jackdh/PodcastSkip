@@ -91,7 +91,7 @@ export function encodeWavChunkAt(
   chunkIndex: number,
   sampleRate = 16000,
   chunkSeconds = 45,
-): { offsetSeconds: number; base64Wav: string } | null {
+): { offsetSeconds: number; durationSeconds: number; base64Wav: string } | null {
   const chunkSamples = Math.max(1, Math.floor(chunkSeconds * sampleRate))
   const start = chunkIndex * chunkSamples
   if (start >= samples.length) return null
@@ -99,6 +99,7 @@ export function encodeWavChunkAt(
   if (!slice.length) return null
   return {
     offsetSeconds: chunkIndex * chunkSeconds,
+    durationSeconds: slice.length / sampleRate,
     base64Wav: arrayBufferToBase64(encodeWav(slice, sampleRate)),
   }
 }
