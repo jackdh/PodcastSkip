@@ -556,7 +556,7 @@ function App() {
 }
 
 function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void; onUnfollow: (show: PodcastShow) => void }) {
-  if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Find your first show</h1><p>Search Apple Podcasts, follow a show, then play from Timeline. Add an OpenRouter key in Settings, download an episode, and Highlight ads to skip breaks and follow the transcript.</p></div>
+  if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Find your first show</h1><p>Search Apple Podcasts, follow a show, then play from Timeline. Add an OpenRouter key in Settings, download an episode, and Highlight ads to transcribe the audio, skip breaks, and follow the words.</p></div>
   return <div className="page followed-home"><div className="eyebrow">YOUR LIBRARY</div><h1>Followed shows</h1><p className="subcopy">New episodes from these shows appear in Timeline.</p><div className="show-grid">{shows.map(show => <div className="show-card" key={show.id}><button className="show-card-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}</small></span><ChevronDown size={17}/></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
@@ -564,7 +564,7 @@ function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDown
   const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? downloadBytesById?.[episode.id] ?? 0), 0)
   const emptyText = timeline ? 'Follow podcasts using search to build your episode Timeline.' : 'Save episodes to listen without an internet connection.'
   const loadingTimeline = timeline && timelineStatus === 'loading' && !episodes.length
-  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Download, then Highlight ads. Red marks on the player bar are skipped when Skip ads is on.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}{loadingTimeline ? <div className="empty"><LoaderCircle className="spin" size={30}/><h3>Loading timeline</h3><p>Fetching the latest episodes from your shows…</p></div> : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
+  return <div className="page library-page"><div className="eyebrow">{downloads ? 'OFFLINE LISTENING' : timeline ? 'FROM YOUR SHOWS' : 'YOUR LIBRARY'}</div><h1>{downloads ? 'Downloads' : timeline ? 'Timeline' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Download, then Highlight ads to transcribe the audio. Red marks on the player bar are skipped when Skip ads is on.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}{loadingTimeline ? <div className="empty"><LoaderCircle className="spin" size={30}/><h3>Loading timeline</h3><p>Fetching the latest episodes from your shows…</p></div> : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
 }
 
 function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, cuesByEpisode, detectingAds = [], onDetectAds, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; activeEpisodeId?: string }) {
@@ -634,7 +634,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
         <div className="settings-icon"><WandSparkles size={22}/></div>
         <div>
           <h2>Smart ad skipping</h2>
-          <p>Add your OpenRouter key, download an episode, then Highlight ads.</p>
+          <p>Add your OpenRouter key, download an episode, then Highlight ads to transcribe that audio.</p>
         </div>
       </div>
       <div className="settings-card">
@@ -657,7 +657,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
           <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>1. Paste your key. 2. Download an episode. 3. Highlight ads. 4. Play — red marks on the bar are skipped, and the transcript follows along. Tap a word to jump.</span></div>
+        <div className="key-note"><Sparkles size={15}/><span>1. Paste your key. 2. Download an episode. 3. Highlight ads transcribes that audio with Whisper — we never use a publisher transcript URL, because those leave ads out. 4. Play: red marks skip, and the words follow along.</span></div>
         <label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a>
           <select value={model} onChange={e => setModel(e.target.value)}>
             <option value="google/gemini-2.5-flash">Gemini 2.5 Flash — recommended</option>
@@ -674,7 +674,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, skipAds, setSkipAds
             ))}
           </select>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>Highlight ads only transcribes this window. Mid-roll ads after it will not be marked. Default is 8 minutes so phone tests do not burn a full episode.</span></div>
+        <div className="key-note"><Sparkles size={15}/><span>Highlight ads transcribes this window of the downloaded audio, then marks ads from that speech. Publisher transcripts are ignored. Mid-roll ads after the window will not be marked. Default is 8 minutes so phone tests do not burn a full episode.</span></div>
         <div className="credit">
           <span>OpenRouter status</span>
           <strong>{keyStatus ? `Connected · ${formatCredits(keyStatus.limitRemaining)}` : apiKey ? 'Not checked yet' : 'Add your key to connect'}</strong>

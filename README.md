@@ -1,7 +1,10 @@
 # Podflow
 
-An offline-first podcast player concept that detects ad segments in downloaded
-episode transcripts and skips them during playback.
+An offline-first podcast player that transcribes downloaded episode audio,
+detects ad segments in that speech, and skips them during playback.
+
+Publisher or Apple transcript URLs are never used. Those files usually omit
+ads, which would make skip-ads trivial to defeat.
 
 ## Highlights
 
@@ -42,8 +45,10 @@ API-key storage stays client-local. Settings can verify the key against
 OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
 
 1. Sends the cached episode audio to OpenRouter speech-to-text (`openai/whisper-1`)
-   in short chunks with timed transcript segments. Settings can limit this to the
-   first N minutes (default 8) so a phone test does not transcribe a full episode.
+   in short chunks with timed transcript segments. The request body is WAV
+   bytes from the download, not a remote transcript URL. Settings can limit
+   this to the first N minutes (default 8) so a phone test does not transcribe
+   a full episode.
 2. Asks your chosen analysis model to mark advertisement ranges from numbered
    transcript cues (not free-form clocks). Predicted ranges are snapped onto
    nearby commercial lines so a round guess like 20:00–21:30 becomes the real

@@ -68,6 +68,7 @@ const episodeFromResult = (result: ItunesResult): Episode => ({
   publishedAt: result.releaseDate,
   duration: formatDuration(result.trackTimeMillis),
   artwork: result.artworkUrl600 ?? result.artworkUrl100,
+  // Audio only. Ignore any publisher/Apple transcript URL — those files omit ads.
   audioUrl: result.episodeUrl,
   description: result.description,
 })

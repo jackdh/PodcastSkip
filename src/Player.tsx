@@ -300,10 +300,10 @@ export function PlayerBar({
       ) : (
         <p className="transcript-empty">
           {adSegments.length
-            ? 'Ads are marked but the transcript was not saved. Re-scan audio to show the words here — tap any word to jump.'
+            ? 'Ads are marked but the spoken transcript was not saved. Re-scan audio to show the words here — tap any word to jump.'
             : downloaded
-              ? 'Highlight ads to transcribe this episode. The words will scroll here as it plays — tap any word to jump.'
-              : 'Download this episode, then Highlight ads to skip breaks and follow the transcript.'}
+              ? 'Highlight ads transcribes the downloaded audio. The words will scroll here as it plays — tap any word to jump.'
+              : 'Download this episode, then Highlight ads to transcribe the audio, skip breaks, and follow the words.'}
         </p>
       )}
     </div>

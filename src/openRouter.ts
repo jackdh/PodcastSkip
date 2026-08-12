@@ -248,6 +248,9 @@ async function transcribeChunk(
   offsetSeconds: number,
   sttModel: string,
 ): Promise<TranscriptCue[]> {
+  // Send the downloaded audio bytes. Never a publisher transcript URL or remote
+  // file URL — official transcripts omit ads, which would make skip-ads trivial
+  // to defeat.
   const response = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
     method: 'POST',
     headers: openRouterHeaders(apiKey),
@@ -327,7 +330,7 @@ export async function transcribeEpisodeSamples(options: {
   for (let index = 0; index < totalChunks; index += 1) {
     const chunk = encodeWavChunkAt(samples, index, 16000, CHUNK_SECONDS)
     if (!chunk) continue
-    options.onProgress?.(`Transcribing audio ${index + 1}/${totalChunks}…`)
+    options.onProgress?.(`Transcribing downloaded audio ${index + 1}/${totalChunks}…`)
     const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, offsetSeconds + chunk.offsetSeconds, sttModel)
     cues.push(...chunkCues)
   }
@@ -474,7 +477,7 @@ export async function detectAdSegmentsFromSamples(options: {
     startMinutes: options.startMinutes,
     onProgress: options.onProgress,
   })
-  options.onProgress?.('Finding ad breaks in the transcript…')
+  options.onProgress?.('Finding ad breaks in the spoken transcript…')
   const segments = await detectAdSegmentsFromTranscript({
     apiKey: options.apiKey,
     model: options.model,
