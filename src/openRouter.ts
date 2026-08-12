@@ -37,16 +37,22 @@ type ChatResponse = {
 type TranscriptionSegment = {
   start?: number
   end?: number
+  begin_time?: number
+  end_time?: number
   text?: string
 }
 
 type TranscriptionResponse = {
   text?: string
   segments?: TranscriptionSegment[]
+  sentences?: TranscriptionSegment[]
+  words?: Array<{ start?: number; end?: number; word?: string; text?: string }>
   error?: { message?: string }
 }
 
 const DEFAULT_STT_MODEL = 'openai/whisper-1'
+export const QWEN_STT_MODEL = 'qwen/qwen3-asr-flash-2026-02-10'
+export const DEEPSEEK_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash'
 const CHUNK_SECONDS = 45
 
 const openRouterHeaders = (apiKey: string, contentType = 'application/json') => ({
@@ -242,6 +248,33 @@ export function excerptAroundSegment(
   }
 }
 
+function cueTime(value: unknown, fallbackUnit: 'seconds' | 'ms' = 'seconds'): number {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return Number.NaN
+  if (fallbackUnit === 'ms' || n > 3600 * 4) return n / 1000
+  return n
+}
+
+function cuesFromTimedParts(
+  parts: TranscriptionSegment[] | undefined,
+  offsetSeconds: number,
+): TranscriptCue[] {
+  if (!parts?.length) return []
+  return parts
+    .map((part) => {
+      const text = (part.text ?? '').trim()
+      const start = cueTime(part.start ?? part.begin_time)
+      const end = cueTime(part.end ?? part.end_time)
+      if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+      return {
+        start: offsetSeconds + start,
+        end: offsetSeconds + end,
+        text,
+      } satisfies TranscriptCue
+    })
+    .filter((cue): cue is TranscriptCue => Boolean(cue))
+}
+
 async function transcribeChunk(
   apiKey: string,
   base64Wav: string,
@@ -251,20 +284,27 @@ async function transcribeChunk(
   // Send the downloaded audio bytes. Never a publisher transcript URL or remote
   // file URL — official transcripts omit ads, which would make skip-ads trivial
   // to defeat.
-  const response = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
+  const audio = { data: base64Wav, format: 'wav' }
+  const timedBody = {
+    model: sttModel,
+    language: 'en',
+    response_format: 'verbose_json',
+    timestamp_granularities: ['segment'],
+    input_audio: audio,
+  }
+  const plainBody = {
+    model: sttModel,
+    input_audio: audio,
+  }
+
+  const post = (body: object) => fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
     method: 'POST',
     headers: openRouterHeaders(apiKey),
-    body: JSON.stringify({
-      model: sttModel,
-      language: 'en',
-      response_format: 'verbose_json',
-      timestamp_granularities: ['segment'],
-      input_audio: {
-        data: base64Wav,
-        format: 'wav',
-      },
-    }),
+    body: JSON.stringify(body),
   })
+
+  let response = await post(timedBody)
+  if (response.status === 400) response = await post(plainBody)
 
   if (response.status === 401) throw new Error('API key is invalid or revoked.')
   if (response.status === 402) throw new Error('OpenRouter credits are exhausted.')
@@ -276,21 +316,10 @@ async function transcribeChunk(
   const payload = await response.json() as TranscriptionResponse
   if (payload.error?.message) throw new Error(payload.error.message)
 
-  if (payload.segments?.length) {
-    return payload.segments
-      .map((segment) => {
-        const text = (segment.text ?? '').trim()
-        const start = Number(segment.start)
-        const end = Number(segment.end)
-        if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
-        return {
-          start: offsetSeconds + start,
-          end: offsetSeconds + end,
-          text,
-        } satisfies TranscriptCue
-      })
-      .filter((cue): cue is TranscriptCue => Boolean(cue))
-  }
+  const timed = cuesFromTimedParts(payload.segments, offsetSeconds)
+  if (timed.length) return timed
+  const sentenceCues = cuesFromTimedParts(payload.sentences, offsetSeconds)
+  if (sentenceCues.length) return sentenceCues
 
   const text = (payload.text ?? '').trim()
   if (!text) return []

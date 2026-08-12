@@ -35,6 +35,7 @@ type Args = {
   maxMinutes: number
   startMinutes: number
   model: string
+  sttModel: string
   audioUrl?: string
   title?: string
   show?: string
@@ -53,6 +54,7 @@ Options:
   --max-minutes <n>      Only analyse N minutes (default: ${DEFAULT_MAX_MINUTES})
   --start-minutes <n>    Skip the first N minutes before analysing (default: 0)
   --model <id>           Analysis model (default: ${DEFAULT_MODEL})
+  --stt-model <id>       Speech-to-text model (default: openai/whisper-1)
   --audio-url <url>      Skip search; download this episode URL directly
   --title <text>         Episode title when using --audio-url
   --show <text>          Show name when using --audio-url
@@ -70,6 +72,7 @@ function parseArgs(argv: string[]): Args {
     maxMinutes: DEFAULT_MAX_MINUTES,
     startMinutes: 0,
     model: DEFAULT_MODEL,
+    sttModel: 'openai/whisper-1',
     out: join(root, 'tmp', 'ad-detect-report.json'),
     help: false,
   }
@@ -90,6 +93,9 @@ function parseArgs(argv: string[]): Args {
       i += 1
     } else if (flag === '--model' && next) {
       args.model = next
+      i += 1
+    } else if (flag === '--stt-model' && next) {
+      args.sttModel = next
       i += 1
     } else if (flag === '--audio-url' && next) {
       args.audioUrl = next
@@ -271,6 +277,7 @@ async function main() {
   if (!episode.audioUrl) throw new Error('Selected episode has no audio URL.')
   console.log(`Episode: ${episode.show} — ${episode.title} (${episode.duration})`)
   console.log(`Audio: ${episode.audioUrl}`)
+  console.log(`STT: ${args.sttModel} · analysis: ${args.model}`)
   console.log(`Analysing ${args.startMinutes > 0 ? `minutes ${args.startMinutes}–${args.startMinutes + args.maxMinutes}` : `first ${args.maxMinutes} minute(s)`} to limit credit use.`)
 
   const workDir = await mkdtemp(join(tmpdir(), 'podflow-ad-detect-'))
@@ -287,6 +294,7 @@ async function main() {
     const { segments, cues, durationSeconds } = await detectAdSegmentsFromSamples({
       apiKey,
       model: args.model,
+      sttModel: args.sttModel,
       title: episode.title,
       show: episode.show,
       description: episode.description,
@@ -303,6 +311,7 @@ async function main() {
       maxMinutes: args.maxMinutes,
       startMinutes: args.startMinutes,
       model: args.model,
+      sttModel: args.sttModel,
       episode: {
         id: episode.id,
         show: episode.show,
