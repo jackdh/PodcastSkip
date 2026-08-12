@@ -33,6 +33,7 @@ const DEFAULT_QUERY = 'NPR Up First'
 type Args = {
   query: string
   maxMinutes: number
+  startMinutes: number
   model: string
   audioUrl?: string
   title?: string
@@ -49,7 +50,8 @@ Required env:
 
 Options:
   --query <text>         Apple Podcasts search (default: "${DEFAULT_QUERY}")
-  --max-minutes <n>      Only analyse the first N minutes (default: ${DEFAULT_MAX_MINUTES})
+  --max-minutes <n>      Only analyse N minutes (default: ${DEFAULT_MAX_MINUTES})
+  --start-minutes <n>    Skip the first N minutes before analysing (default: 0)
   --model <id>           Analysis model (default: ${DEFAULT_MODEL})
   --audio-url <url>      Skip search; download this episode URL directly
   --title <text>         Episode title when using --audio-url
@@ -66,6 +68,7 @@ function parseArgs(argv: string[]): Args {
   const args: Args = {
     query: DEFAULT_QUERY,
     maxMinutes: DEFAULT_MAX_MINUTES,
+    startMinutes: 0,
     model: DEFAULT_MODEL,
     out: join(root, 'tmp', 'ad-detect-report.json'),
     help: false,
@@ -81,6 +84,9 @@ function parseArgs(argv: string[]): Args {
       i += 1
     } else if (flag === '--max-minutes' && next) {
       args.maxMinutes = Number(next)
+      i += 1
+    } else if (flag === '--start-minutes' && next) {
+      args.startMinutes = Number(next)
       i += 1
     } else if (flag === '--model' && next) {
       args.model = next
@@ -104,6 +110,9 @@ function parseArgs(argv: string[]): Args {
 
   if (!Number.isFinite(args.maxMinutes) || args.maxMinutes <= 0) {
     throw new Error('--max-minutes must be a positive number')
+  }
+  if (!Number.isFinite(args.startMinutes) || args.startMinutes < 0) {
+    throw new Error('--start-minutes must be zero or a positive number')
   }
   return args
 }
@@ -179,11 +188,17 @@ function formatClock(seconds: number) {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-function pickEpisode(episodes: Episode[]): Episode {
+function pickEpisode(episodes: Episode[], query: string): Episode {
   const withAudio = episodes.filter((episode) => episode.audioUrl)
   if (!withAudio.length) throw new Error('No searchable episodes with audio URLs were found.')
-  // Prefer shorter catalogue durations when Apple provides them (e.g. "12m").
+  const tokens = query.toLowerCase().split(/\s+/).filter((token) => token.length > 3)
   const scored = [...withAudio].sort((a, b) => {
+    const score = (episode: Episode) => {
+      const hay = `${episode.title} ${episode.show}`.toLowerCase()
+      return tokens.reduce((total, token) => total + (hay.includes(token) ? 1 : 0), 0)
+    }
+    const byTitle = score(b) - score(a)
+    if (byTitle !== 0) return byTitle
     const aMinutes = Number((a.duration.match(/(\d+)\s*m/) ?? [])[1] ?? 999)
     const bMinutes = Number((b.duration.match(/(\d+)\s*m/) ?? [])[1] ?? 999)
     return aMinutes - bMinutes
@@ -250,13 +265,13 @@ async function main() {
   } else {
     console.log(`Searching Apple Podcasts for “${args.query}”…`)
     const catalog = await searchCatalog(args.query)
-    episode = pickEpisode(catalog.episodes)
+    episode = pickEpisode(catalog.episodes, args.query)
   }
 
   if (!episode.audioUrl) throw new Error('Selected episode has no audio URL.')
   console.log(`Episode: ${episode.show} — ${episode.title} (${episode.duration})`)
   console.log(`Audio: ${episode.audioUrl}`)
-  console.log(`Analysing first ${args.maxMinutes} minute(s) only to limit credit use.`)
+  console.log(`Analysing ${args.startMinutes > 0 ? `minutes ${args.startMinutes}–${args.startMinutes + args.maxMinutes}` : `first ${args.maxMinutes} minute(s)`} to limit credit use.`)
 
   const workDir = await mkdtemp(join(tmpdir(), 'podflow-ad-detect-'))
   const audioPath = join(workDir, 'episode.bin')
@@ -265,11 +280,9 @@ async function main() {
     await downloadFile(episode.audioUrl, audioPath)
 
     console.log('Decoding to 16 kHz mono with ffmpeg…')
-    let samples = await decodeToMono16k(audioPath)
+    const samples = await decodeToMono16k(audioPath)
     const fullDurationSeconds = samples.length / SAMPLE_RATE
-    const maxSamples = Math.floor(args.maxMinutes * 60 * SAMPLE_RATE)
-    if (samples.length > maxSamples) samples = samples.subarray(0, maxSamples)
-    console.log(`Decoded ${fullDurationSeconds.toFixed(1)}s; using ${ (samples.length / SAMPLE_RATE).toFixed(1)}s for analysis.`)
+    console.log(`Decoded ${fullDurationSeconds.toFixed(1)}s; analysing a ${args.maxMinutes}m window${args.startMinutes ? ` starting at ${args.startMinutes}m` : ''}.`)
 
     const { segments, cues, durationSeconds } = await detectAdSegmentsFromSamples({
       apiKey,
@@ -278,6 +291,8 @@ async function main() {
       show: episode.show,
       description: episode.description,
       samples,
+      maxMinutes: args.maxMinutes,
+      startMinutes: args.startMinutes || undefined,
       onProgress: (message) => console.log(message),
     })
 
@@ -286,6 +301,7 @@ async function main() {
       ranAt: new Date().toISOString(),
       query: args.audioUrl ? null : args.query,
       maxMinutes: args.maxMinutes,
+      startMinutes: args.startMinutes,
       model: args.model,
       episode: {
         id: episode.id,

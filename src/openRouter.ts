@@ -1,4 +1,5 @@
 import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount } from './audioTranscript'
+import { coerceMinuteClocks, refineAdSegments } from './adRefine'
 
 export type AdSegment = {
   start: number
@@ -117,6 +118,14 @@ function segmentFromCueRange(
   return { start, end, label }
 }
 
+function parseTimeField(raw: unknown): number {
+  if (typeof raw === 'string') {
+    const clock = raw.trim().match(/^(\d+):([0-5]?\d)(?:\.\d+)?$/)
+    if (clock) return Number(clock[1]) * 60 + Number(clock[2])
+  }
+  return Number(raw)
+}
+
 function segmentFromSeconds(
   start: number,
   end: number,
@@ -167,9 +176,12 @@ function normalizeSegments(raw: unknown, durationSeconds: number, cues: Transcri
     const fromCues = startCue !== undefined && endCue !== undefined
       ? segmentFromCueRange(startCue, endCue, cues, label)
       : null
+    const rawStart = parseTimeField(record.start ?? record.startSeconds ?? record.from)
+    const rawEnd = parseTimeField(record.end ?? record.endSeconds ?? record.to)
+    const clock = coerceMinuteClocks(rawStart, rawEnd, durationSeconds)
     const fromSeconds = segmentFromSeconds(
-      Number(record.start ?? record.startSeconds ?? record.from),
-      Number(record.end ?? record.endSeconds ?? record.to),
+      clock.start,
+      clock.end,
       durationSeconds,
       cues,
       label,
@@ -287,19 +299,26 @@ export async function transcribeEpisodeSamples(options: {
   samples: Float32Array
   sttModel?: string
   maxMinutes?: number
+  startMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
   const trimmed = options.apiKey.trim()
   if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
 
   let samples = options.samples
+  let offsetSeconds = 0
+  if (options.startMinutes && options.startMinutes > 0) {
+    const startSamples = Math.floor(options.startMinutes * 60 * 16000)
+    offsetSeconds = startSamples / 16000
+    if (startSamples < samples.length) samples = samples.subarray(startSamples)
+  }
   if (options.maxMinutes && options.maxMinutes > 0) {
     const maxSamples = Math.floor(options.maxMinutes * 60 * 16000)
     if (samples.length > maxSamples) samples = samples.subarray(0, maxSamples)
   }
 
-  const durationSeconds = samples.length / 16000
-  if (durationSeconds < 15) throw new Error('This episode is too short to analyse for ads.')
+  const durationSeconds = offsetSeconds + samples.length / 16000
+  if (samples.length / 16000 < 15) throw new Error('This episode is too short to analyse for ads.')
 
   const totalChunks = wavChunkCount(samples.length, 16000, CHUNK_SECONDS)
   const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
@@ -309,7 +328,7 @@ export async function transcribeEpisodeSamples(options: {
     const chunk = encodeWavChunkAt(samples, index, 16000, CHUNK_SECONDS)
     if (!chunk) continue
     options.onProgress?.(`Transcribing audio ${index + 1}/${totalChunks}…`)
-    const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, chunk.offsetSeconds, sttModel)
+    const chunkCues = await transcribeChunk(trimmed, chunk.base64Wav, offsetSeconds + chunk.offsetSeconds, sttModel)
     cues.push(...chunkCues)
   }
 
@@ -343,21 +362,28 @@ export async function detectAdSegmentsFromTranscript(options: {
   description?: string
   durationSeconds: number
   cues: TranscriptCue[]
+  onProgress?: (message: string) => void
 }): Promise<AdSegment[]> {
   const trimmed = options.apiKey.trim()
   if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
   if (!options.cues.length) throw new Error('No transcript available for ad detection.')
 
-  const transcript = formatTranscriptForPrompt(options.cues).slice(0, 100_000)
-  const lastCueId = options.cues.length
-  const prompt = `You are analysing a numbered podcast transcript to find advertisement and sponsor-read segments.
+  const windows = splitCuesForPrompt(options.cues)
+  const collected: AdSegment[] = []
+  for (let index = 0; index < windows.length; index += 1) {
+    if (windows.length > 1) options.onProgress?.(`Finding ad breaks ${index + 1}/${windows.length}…`)
+    const windowCues = windows[index]
+    const lastCueId = windowCues.length
+    const transcript = formatTranscriptForPrompt(windowCues)
+    const prompt = `You are analysing a numbered podcast transcript to find advertisement and sponsor-read segments.
 
 Return ONLY JSON:
 {"segments":[{"startCue":13,"endCue":19,"label":"sponsor reads"}]}
 
 Rules:
 - startCue and endCue are inclusive cue ids from the # numbers below (1 through ${lastCueId})
-- Do not invent ids or timestamps; copy ids from the transcript
+- Those ids are NOT clock minutes: #20 is cue twenty, not 20:00
+- Do not invent ids or round to whole minutes; copy ids from the transcript
 - Mark host-read ads, network ads, "this message comes from", "this show is brought to you by", "NPR sponsor", discount codes, product URLs, and the legal disclaimer that closes an ad
 - Do NOT mark show intros/outros, headlines, or news/host copy that is not selling something
 - Stop at the last commercial sentence. The first cue that returns to the story/news is NOT part of the ad
@@ -373,33 +399,59 @@ Analysed duration: ${options.durationSeconds.toFixed(1)} seconds
 Transcript:
 ${transcript}`
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: openRouterHeaders(trimmed),
-    body: JSON.stringify({
-      model: options.model,
-      temperature: 0.1,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You detect podcast advertisements from numbered transcript cues. Reply with JSON only using startCue/endCue ids.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  })
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: openRouterHeaders(trimmed),
+      body: JSON.stringify({
+        model: options.model,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'You detect podcast advertisements from numbered transcript cues. Reply with JSON only using startCue/endCue ids. Never treat cue ids as clock minutes.' },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    })
 
-  if (response.status === 401) throw new Error('API key is invalid or revoked.')
-  if (response.status === 402) throw new Error('OpenRouter credits are exhausted.')
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new Error(detail ? `OpenRouter error: ${detail.slice(0, 180)}` : `OpenRouter request failed (${response.status}).`)
+    if (response.status === 401) throw new Error('API key is invalid or revoked.')
+    if (response.status === 402) throw new Error('OpenRouter credits are exhausted.')
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(detail ? `OpenRouter error: ${detail.slice(0, 180)}` : `OpenRouter request failed (${response.status}).`)
+    }
+
+    const payload = await response.json() as ChatResponse
+    if (payload.error?.message) throw new Error(payload.error.message)
+    const content = payload.choices?.[0]?.message?.content
+    if (!content) throw new Error('OpenRouter returned an empty response.')
+
+    collected.push(...normalizeSegments(extractJsonObject(content), options.durationSeconds, windowCues))
   }
 
-  const payload = await response.json() as ChatResponse
-  if (payload.error?.message) throw new Error(payload.error.message)
-  const content = payload.choices?.[0]?.message?.content
-  if (!content) throw new Error('OpenRouter returned an empty response.')
+  return refineAdSegments(mergeOverlappingSegments(collected.sort((a, b) => a.start - b.start)), options.cues)
+}
 
-  return normalizeSegments(extractJsonObject(content), options.durationSeconds, options.cues)
+function splitCuesForPrompt(cues: TranscriptCue[], maxChars = 80_000): TranscriptCue[][] {
+  const full = formatTranscriptForPrompt(cues)
+  if (full.length <= maxChars) return [cues]
+
+  const windows: TranscriptCue[][] = []
+  let current: TranscriptCue[] = []
+  let chars = 0
+  for (const cue of cues) {
+    const line = formatTranscriptForPrompt([cue]).length + 1
+    if (current.length && chars + line > maxChars) {
+      windows.push(current)
+      const overlap = current.slice(-8)
+      current = [...overlap, cue]
+      chars = formatTranscriptForPrompt(current).length
+    } else {
+      current.push(cue)
+      chars += line
+    }
+  }
+  if (current.length) windows.push(current)
+  return windows.length ? windows : [cues]
 }
 
 export async function detectAdSegmentsFromSamples(options: {
@@ -411,6 +463,7 @@ export async function detectAdSegmentsFromSamples(options: {
   samples: Float32Array
   sttModel?: string
   maxMinutes?: number
+  startMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ segments: AdSegment[]; cues: TranscriptCue[]; durationSeconds: number }> {
   const { cues, durationSeconds } = await transcribeEpisodeSamples({
@@ -418,6 +471,7 @@ export async function detectAdSegmentsFromSamples(options: {
     samples: options.samples,
     sttModel: options.sttModel,
     maxMinutes: options.maxMinutes,
+    startMinutes: options.startMinutes,
     onProgress: options.onProgress,
   })
   options.onProgress?.('Finding ad breaks in the transcript…')
@@ -429,6 +483,7 @@ export async function detectAdSegmentsFromSamples(options: {
     description: options.description,
     durationSeconds,
     cues,
+    onProgress: options.onProgress,
   })
   return { segments, cues, durationSeconds }
 }

@@ -299,9 +299,11 @@ export function PlayerBar({
         <TranscriptFollow cues={cues} adSegments={adSegments} currentTime={currentTime} onSeek={onSeek} />
       ) : (
         <p className="transcript-empty">
-          {downloaded
-            ? 'Highlight ads to transcribe this episode. The words will scroll here as it plays — tap any word to jump.'
-            : 'Download this episode, then Highlight ads to skip breaks and follow the transcript.'}
+          {adSegments.length
+            ? 'Ads are marked but the transcript was not saved. Re-scan audio to show the words here — tap any word to jump.'
+            : downloaded
+              ? 'Highlight ads to transcribe this episode. The words will scroll here as it plays — tap any word to jump.'
+              : 'Download this episode, then Highlight ads to skip breaks and follow the transcript.'}
         </p>
       )}
     </div>

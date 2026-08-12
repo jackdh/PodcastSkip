@@ -45,9 +45,13 @@ OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
    in short chunks with timed transcript segments. Settings can limit this to the
    first N minutes (default 8) so a phone test does not transcribe a full episode.
 2. Asks your chosen analysis model to mark advertisement ranges from numbered
-   transcript cues (not free-form clocks).
-3. Stores cues + ad ranges on the device. Open now playing to follow the
-   transcript as it plays; tap a word to jump. Downloads lists each marked
+   transcript cues (not free-form clocks). Predicted ranges are snapped onto
+   nearby commercial lines so a round guess like 20:00–21:30 becomes the real
+   read (for example 19:05–20:32).
+3. Stores cues in IndexedDB (Safari localStorage is too small for a full
+   episode transcript) and ad ranges in localStorage. Open now playing to
+   follow the transcript as it plays; tap a word to jump. If ads are marked
+   but the words are missing, re-scan the episode. Downloads lists each marked
    range with a short excerpt.
 
 Local `npm run dev` and `npm run preview` proxy publisher audio through
@@ -69,8 +73,16 @@ cp .env.example .env.local   # or export OPENROUTER_API_KEY=...
 npm run test:ad-detect -- --query "NPR Up First" --max-minutes 3
 ```
 
-Defaults analyse only the first few minutes to limit spend. Report lands at
-`tmp/ad-detect-report.json` (and `/opt/cursor/artifacts/ad-detect-report.json`
-in Cursor cloud). Each predicted ad includes a short transcript excerpt
-(`before` / `during` / `after`) so you can judge false positives without
-dumping the whole file. Pass `--help` for flags (`--audio-url`, `--model`, `--out`).
+Defaults analyse only the first few minutes to limit spend. Use
+`--start-minutes` to jump to a mid-roll (for example `--start-minutes 18
+--max-minutes 4`). Report lands at `tmp/ad-detect-report.json` (and
+`/opt/cursor/artifacts/ad-detect-report.json` in Cursor cloud). Each predicted
+ad includes a short transcript excerpt (`before` / `during` / `after`) so you
+can judge false positives without dumping the whole file. Pass `--help` for
+flags (`--audio-url`, `--model`, `--out`).
+
+Clock-snap helper (no API key):
+
+```bash
+npm run test:ad-refine
+```

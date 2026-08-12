@@ -8,7 +8,7 @@ Commands are defined in `package.json` and documented in `README.md`:
 - Dev server: `npm run dev` (Vite on `http://localhost:5173`).
 - Build: `npm run build` (`tsc -b` typecheck + `vite build`, emits PWA service worker via `vite-plugin-pwa`).
 - Storybook (optional UI lab): `npm run storybook` (port 6006).
-- One-off real ad detect (manual, burns credits; needs `OPENROUTER_API_KEY` + ffmpeg): `npm run test:ad-detect -- --query "…" --max-minutes 3`. Writes `tmp/ad-detect-report.json` for agent inspection. Do not put this on CI.
+- One-off real ad detect (manual, burns credits; needs `OPENROUTER_API_KEY` + ffmpeg): `npm run test:ad-detect -- --query "…" --max-minutes 3`. Writes `tmp/ad-detect-report.json` for agent inspection. Do not put this on CI. Clock-snap check (no key): `npm run test:ad-refine`.
 
 Git / deploy workflow:
 - For now, commit and push directly to `main`. Do not create feature branches or PRs unless asked.

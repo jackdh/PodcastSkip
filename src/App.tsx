@@ -13,13 +13,12 @@ import {
   formatMinutesSaved,
   type AdSegment,
   type KeyStatus,
-  type TranscriptCue,
 } from './openRouter'
 import { forceAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
+import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
 
 type AdSegmentMap = Record<string, AdSegment[]>
-type CueMap = Record<string, TranscriptCue[]>
 const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 0] as const
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
@@ -61,10 +60,8 @@ function App() {
     try { return JSON.parse(localStorage.getItem('podflow-ad-segments') ?? '{}') as AdSegmentMap }
     catch { return {} }
   })
-  const [cuesByEpisode, setCuesByEpisode] = useState<CueMap>(() => {
-    try { return JSON.parse(localStorage.getItem('podflow-transcript-cues') ?? '{}') as CueMap }
-    catch { return {} }
-  })
+  const [cuesByEpisode, setCuesByEpisode] = useState<CueMap>({})
+  const [transcriptsReady, setTranscriptsReady] = useState(false)
   const [secondsSaved, setSecondsSaved] = useState(() => {
     const saved = Number(localStorage.getItem('podflow-seconds-saved') ?? 0)
     return Number.isFinite(saved) ? saved : 0
@@ -122,8 +119,31 @@ function App() {
   }, [adSegmentsByEpisode])
 
   useEffect(() => {
-    localStorage.setItem('podflow-transcript-cues', JSON.stringify(cuesByEpisode))
-  }, [cuesByEpisode])
+    let cancelled = false
+    void (async () => {
+      let fromIdb: CueMap = {}
+      try { fromIdb = await loadAllTranscripts() } catch { /* IndexedDB may be blocked. */ }
+      let merged = fromIdb
+      try {
+        const raw = localStorage.getItem('podflow-transcript-cues')
+        if (raw) {
+          const parsed = JSON.parse(raw) as CueMap
+          merged = { ...parsed, ...fromIdb }
+          localStorage.removeItem('podflow-transcript-cues')
+        }
+      } catch { /* Ignore a bad legacy cache. */ }
+      if (!cancelled) {
+        setCuesByEpisode((current) => ({ ...merged, ...current }))
+        setTranscriptsReady(true)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!transcriptsReady) return
+    void saveAllTranscripts(cuesByEpisode).catch(() => undefined)
+  }, [cuesByEpisode, transcriptsReady])
 
   useEffect(() => {
     localStorage.setItem('podflow-seconds-saved', String(secondsSaved))
@@ -346,6 +366,7 @@ function App() {
         delete next[episode.id]
         return next
       })
+      void deleteTranscript(episode.id)
       void refreshStorageUsage()
       setToast('Removed downloaded episode')
       return
@@ -449,6 +470,9 @@ function App() {
       })
       setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
       setCuesByEpisode((current) => ({ ...current, [episode.id]: cues }))
+      void saveTranscript(episode.id, cues).catch(() => undefined)
+      setActiveEpisode(episode)
+      setPlayerOpen(true)
       const windowNote = analyseMinutes > 0 ? ` in the first ${analyseMinutes} minutes` : ''
       setToast(segments.length
         ? `Marked ${segments.length} ad ${segments.length === 1 ? 'segment' : 'segments'}${windowNote}`
@@ -555,7 +579,7 @@ function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDown
     const isDownloading = downloading.includes(e.id)
     const isActive = activeEpisodeId === e.id
     const bytes = e.downloadBytes ?? downloadBytesById?.[e.id] ?? 0
-    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <LoaderCircle className="spin" size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Scanning audio…' : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button>{segments.length > 0 && <ul className="ad-range-list">{segments.map(segment => { const during = excerptAroundSegment(cues, segment.start, segment.end).during; const preview = during.map(cue => cue.text.trim()).join(' ').slice(0, 160); return <li key={`${segment.start}-${segment.end}`}><b>{formatTime(segment.start)}–{formatTime(segment.end)}</b>{segment.label ? ` · ${segment.label}` : ''}{preview ? <p>{preview}{during.map(cue => cue.text.trim()).join(' ').length > 160 ? '…' : ''}</p> : null}</li> })}</ul>}</div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} disabled={isDownloading} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Downloading episode' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading…' : 'Download episode'}>{isDownloading ? <LoaderCircle className="spin" size={18}/> : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
+    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}</span><h3>{e.title}</h3><p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <LoaderCircle className="spin" size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Scanning audio…' : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button>{segments.length > 0 && <ul className="ad-range-list">{segments.map(segment => { const during = excerptAroundSegment(cues, segment.start, segment.end).during; const preview = during.map(cue => cue.text.trim()).join(' ').slice(0, 160); return <li key={`${segment.start}-${segment.end}`}><b>{formatTime(segment.start)}–{formatTime(segment.end)}</b>{segment.label ? ` · ${segment.label}` : ''}{preview ? <p>{preview}{during.map(cue => cue.text.trim()).join(' ').length > 160 ? '…' : ''}</p> : !cues.length ? <p>Transcript missing — re-scan to restore the words.</p> : null}</li> })}</ul>}</div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} disabled={isDownloading} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Downloading episode' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading…' : 'Download episode'}>{isDownloading ? <LoaderCircle className="spin" size={18}/> : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
   })}</div>
 }
 
