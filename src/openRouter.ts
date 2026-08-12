@@ -384,10 +384,10 @@ Rules:
 - startCue and endCue are inclusive cue ids from the # numbers below (1 through ${lastCueId})
 - Those ids are NOT clock minutes: #20 is cue twenty, not 20:00
 - Do not invent ids or round to whole minutes; copy ids from the transcript
-- Mark host-read ads, network ads, "this message comes from", "this show is brought to you by", "NPR sponsor", discount codes, product URLs, and the legal disclaimer that closes an ad
+- Mark the FULL sponsor read: cold-open sales copy, "brought to you by", the product pitch, discount/URL closer, and the last commercial sentence
 - Do NOT mark show intros/outros, headlines, or news/host copy that is not selling something
 - Stop at the last commercial sentence. The first cue that returns to the story/news is NOT part of the ad
-- Merge contiguous commercial cues into one segment
+- Merge contiguous commercial cues into one segment — never mark only the "brought to you by" line
 - If unsure, omit the segment
 - If none found, return {"segments":[]}
 
