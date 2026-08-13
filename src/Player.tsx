@@ -5,9 +5,9 @@ import {
 } from 'lucide-react'
 import type { Episode } from './podcastApi'
 import type { AdSegment, TranscriptCue } from './openRouter'
+import type { TimeRange } from './scanCache'
 import {
   activeCueIndex,
-  analysisWindowEnd,
   buildScrubberSegments,
   cueOverlapsAd,
   formatRemaining,
@@ -15,8 +15,9 @@ import {
   isPlayheadPastTranscript,
   needsFullEpisodeScan,
   nextSleepMinutes,
+  scanCoverageLabel,
+  scannedRangesForEpisode,
   segmentPlayedFraction,
-  transcriptCoverageEnd,
   wordsFromCue,
 } from './playerModel'
 
@@ -46,6 +47,7 @@ function SegmentedScrubber({
   fallbackLabel,
   title,
   adSegments,
+  scannedRanges,
   onSeek,
   variant = 'full',
 }: {
@@ -54,6 +56,7 @@ function SegmentedScrubber({
   fallbackLabel: string
   title?: string
   adSegments: AdSegment[]
+  scannedRanges?: TimeRange[] | null
   onSeek: SeekHandler
   variant?: 'full' | 'slim'
 }) {
@@ -64,7 +67,7 @@ function SegmentedScrubber({
   const trackMax = duration > 0 && Number.isFinite(duration) ? duration : 1
   const displayTime = seeking ? seekTime : currentTime
   const progress = Math.min(1, Math.max(0, displayTime / trackMax))
-  const segments = buildScrubberSegments(duration, adSegments)
+  const segments = buildScrubberSegments(duration, adSegments, scannedRanges)
   const tooltip = title || fallbackLabel
 
   const commit = (value: number) => {
@@ -130,7 +133,13 @@ function SegmentedScrubber({
                 flexGrow: Math.max(segment.end - segment.start, 0.4),
                 ['--played' as string]: `${segmentPlayedFraction(segment, displayTime) * 100}%`,
               }}
-              title={segment.kind === 'ad' ? (segment.label ? `Ad: ${segment.label}` : 'Ad break') : undefined}
+              title={
+                segment.kind === 'ad'
+                  ? (segment.label ? `Ad: ${segment.label}` : 'Ad break')
+                  : segment.kind === 'unscanned'
+                    ? 'Not scanned yet'
+                    : undefined
+              }
             />
           ))}
         </div>
@@ -158,7 +167,7 @@ function VolumeSlider({ value, onChange }: { value: number; onChange: (value: nu
 
   return (
     <div className="now-volume">
-      <Volume2 size={13} strokeWidth={1.8} aria-hidden />
+      <Volume2 size={14} strokeWidth={1.8} aria-hidden />
       <div
         ref={railRef}
         className="now-volume-rail"
@@ -338,8 +347,9 @@ export function PlayerBar({
   currentTime,
   duration,
   onSeek,
-  adSegments,
+      adSegments,
   cues = [],
+  scannedRanges,
   downloaded = false,
   skipAds,
   onSkipAdsChange,
@@ -364,6 +374,7 @@ export function PlayerBar({
   onSeek: SeekHandler
   adSegments: AdSegment[]
   cues?: TranscriptCue[]
+  scannedRanges?: TimeRange[] | null
   downloaded?: boolean
   skipAds: boolean
   onSkipAdsChange: (value: boolean) => void
@@ -433,8 +444,9 @@ export function PlayerBar({
   }
 
   const pastCoverage = isPlayheadPastTranscript(cues, currentTime)
-  const scanRest = needsFullEpisodeScan(cues, analyseMinutes, duration)
-  const coverageEnd = transcriptCoverageEnd(cues)
+  const ranges = scannedRangesForEpisode(cues, scannedRanges)
+  const scanRest = needsFullEpisodeScan(cues, analyseMinutes, duration, ranges)
+  const coverageLabel = scanCoverageLabel(ranges, duration)
   const transcriptOpen = showTranscript && cues.length > 0
 
   if (!expanded) {
@@ -447,6 +459,7 @@ export function PlayerBar({
             fallbackLabel={episode.duration}
             title={episode.title}
             adSegments={adSegments}
+            scannedRanges={ranges.length ? ranges : undefined}
             onSeek={onSeek}
             variant="slim"
           />
@@ -537,16 +550,18 @@ export function PlayerBar({
       )}
 
       <div className="now-controls">
-        {(scanRest || pastCoverage) && (
+        {coverageLabel && (
           <div className="now-coverage">
             <span>
               {pastCoverage
-                ? `Past transcript · ${formatTime(coverageEnd)}`
-                : `Transcript ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
+                ? `Past transcript · ${coverageLabel}`
+                : coverageLabel}
             </span>
-            <button type="button" disabled={detecting || !downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
-              {detecting ? 'Scanning…' : 'Scan rest'}
-            </button>
+            {scanRest ? (
+              <button type="button" disabled={detecting || !downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
+                {detecting ? 'Scanning…' : 'Scan rest'}
+              </button>
+            ) : null}
           </div>
         )}
 
@@ -556,20 +571,23 @@ export function PlayerBar({
           fallbackLabel={episode.duration}
           title={episode.title}
           adSegments={adSegments}
+          scannedRanges={ranges.length ? ranges : undefined}
           onSeek={onSeek}
         />
 
         <div className="now-transport">
           <button className="now-rate" onClick={cycleRate} aria-label="Playback speed">{playbackRate}x</button>
-          <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
-            <RotateCcw size={26} strokeWidth={1.6} /><span>15</span>
-          </button>
-          <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
-            {playing ? <Pause fill="currentColor" size={38} /> : <Play fill="currentColor" size={38} />}
-          </button>
-          <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
-            <RotateCw size={26} strokeWidth={1.6} /><span>30</span>
-          </button>
+          <div className="now-skip-group">
+            <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
+              <RotateCcw size={28} strokeWidth={1.55} /><span>15</span>
+            </button>
+            <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
+              {playing ? <Pause fill="currentColor" size={36} /> : <Play fill="currentColor" size={36} />}
+            </button>
+            <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
+              <RotateCw size={28} strokeWidth={1.55} /><span>30</span>
+            </button>
+          </div>
           <button className={`now-sleep ${sleepMinutes ? 'on' : ''}`} onClick={cycleSleep} aria-label="Sleep timer">
             <Moon size={20} strokeWidth={1.6} />
             {sleepMinutes ? <em>{sleepMinutes}m</em> : null}
@@ -578,7 +596,7 @@ export function PlayerBar({
 
         <VolumeSlider value={volume} onChange={onVolumeChange} />
 
-        <div className="now-dock">
+        <div className="now-footer">
           <button
             className={`now-dock-btn icon ${transcriptOpen ? 'on' : ''}`}
             aria-label="Transcript"
@@ -589,8 +607,8 @@ export function PlayerBar({
             <Captions size={22} />
           </button>
           <button className={`now-dock-device ${skipAds ? 'on' : ''}`} onClick={() => onSkipAdsChange(!skipAds)}>
-            <Headphones size={20} strokeWidth={1.7} />
-            <span>Skip ads {skipAds ? 'on' : 'off'}</span>
+            <Headphones size={18} strokeWidth={1.7} />
+            <span>Skip ads</span>
           </button>
           {downloaded ? (
             <button className="now-dock-btn icon" disabled={detecting} onClick={() => onHighlightAds?.({ windowMinutes: 0 })} aria-label={detecting ? 'Scanning' : adSegments.length ? 'Re-scan' : 'Highlight ads'}>

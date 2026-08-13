@@ -125,6 +125,16 @@ export function createAudioContext(): AudioContext {
   return new Ctor()
 }
 
+/** One shared AudioContext cannot decode two buffers at once; queue the work. */
+export function createTaskQueue() {
+  let tail: Promise<unknown> = Promise.resolve()
+  return function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = tail.then(task, task)
+    tail = run.then(() => undefined, () => undefined)
+    return run
+  }
+}
+
 export async function decodeEpisodeAudio(blob: Blob, context?: AudioContext): Promise<Float32Array> {
   const local = context ?? createAudioContext()
   try {

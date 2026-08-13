@@ -1,6 +1,7 @@
 import type { AdSegment, TranscriptCue } from './openRouter'
+import { coverageEnd, coverageSeconds, mergeRanges, rangesFromCues, type TimeRange } from './scanCache'
 
-export type ScrubberKind = 'content' | 'ad'
+export type ScrubberKind = 'content' | 'ad' | 'unscanned'
 
 export type ScrubberSegment = {
   start: number
@@ -57,9 +58,19 @@ export function needsFullEpisodeScan(
   cues: TranscriptCue[],
   _analyseMinutes: number,
   duration: number,
+  scannedRanges?: TimeRange[] | null,
 ): boolean {
-  if (!(duration > 15) || !cues.length) return false
-  return transcriptCoverageEnd(cues) < duration - 15
+  if (!(duration > 15)) return false
+  const covered = scannedRanges?.length ? coverageEnd(scannedRanges) : (cues.length ? transcriptCoverageEnd(cues) : 0)
+  if (covered <= 0) return false
+  return covered < duration - 15
+}
+
+export function scanCoverageLabel(ranges: TimeRange[], duration: number): string | null {
+  const scanned = coverageSeconds(ranges)
+  if (scanned < 1) return null
+  if (duration > 0 && scanned >= duration - 15) return null
+  return `${formatTime(scanned)} scanned`
 }
 
 export function wordsFromCue(cue: TranscriptCue) {
@@ -96,13 +107,38 @@ export function mergeAdSegments(ads: AdSegment[]): AdSegment[] {
   return merged
 }
 
-function contentSegment(start: number, end: number): ScrubberSegment | null {
-  if (end - start <= 0.05) return null
-  return { start, end, kind: 'content' }
+function splitByCoverage(start: number, end: number, scanned: TimeRange[]): Array<{ start: number; end: number; scanned: boolean }> {
+  if (end - start <= 0.05) return []
+  const blocks = mergeRanges(scanned)
+  if (!blocks.length) return [{ start, end, scanned: false }]
+
+  const parts: Array<{ start: number; end: number; scanned: boolean }> = []
+  let cursor = start
+  for (const block of blocks) {
+    if (block.end <= cursor) continue
+    if (block.start >= end) break
+    if (block.start > cursor + 0.05) parts.push({ start: cursor, end: Math.min(block.start, end), scanned: false })
+    const coveredStart = Math.max(cursor, block.start)
+    const coveredEnd = Math.min(end, block.end)
+    if (coveredEnd > coveredStart + 0.05) parts.push({ start: coveredStart, end: coveredEnd, scanned: true })
+    cursor = Math.max(cursor, coveredEnd)
+    if (cursor >= end) break
+  }
+  if (cursor < end - 0.05) parts.push({ start: cursor, end, scanned: false })
+  return parts
 }
 
-/** Chapter-style gaps: one bar per content/ad range. Never slice content into a bar graph. */
-export function buildScrubberSegments(duration: number, adSegments: AdSegment[]): ScrubberSegment[] {
+function contentSegment(start: number, end: number, kind: ScrubberKind = 'content'): ScrubberSegment | null {
+  if (end - start <= 0.05) return null
+  return { start, end, kind }
+}
+
+/** Chapter-style gaps: ads, scanned content, and dim unscanned audio. */
+export function buildScrubberSegments(
+  duration: number,
+  adSegments: AdSegment[],
+  scannedRanges?: TimeRange[] | null,
+): ScrubberSegment[] {
   const track = duration > 0 && Number.isFinite(duration) ? duration : 1
   const ads = mergeAdSegments(adSegments)
     .map((ad) => ({
@@ -112,23 +148,47 @@ export function buildScrubberSegments(duration: number, adSegments: AdSegment[])
     }))
     .filter((ad) => ad.end - ad.start >= 0.05)
 
+  const scanned = scannedRanges ? mergeRanges(scannedRanges) : null
   const segments: ScrubberSegment[] = []
   let cursor = 0
   for (const ad of ads) {
-    const before = contentSegment(cursor, ad.start)
-    if (before) segments.push(before)
+    if (ad.start > cursor + 0.05) {
+      if (scanned) {
+        for (const part of splitByCoverage(cursor, ad.start, scanned)) {
+          const piece = contentSegment(part.start, part.end, part.scanned ? 'content' : 'unscanned')
+          if (piece) segments.push(piece)
+        }
+      } else {
+        const before = contentSegment(cursor, ad.start)
+        if (before) segments.push(before)
+      }
+    }
     const adStart = Math.max(cursor, ad.start)
     if (ad.end > adStart + 0.05) {
       segments.push({ start: adStart, end: ad.end, kind: 'ad', label: ad.label })
       cursor = ad.end
     }
   }
-  const after = contentSegment(cursor, track)
-  if (after) segments.push(after)
+  if (cursor < track - 0.05) {
+    if (scanned) {
+      for (const part of splitByCoverage(cursor, track, scanned)) {
+        const piece = contentSegment(part.start, part.end, part.scanned ? 'content' : 'unscanned')
+        if (piece) segments.push(piece)
+      }
+    } else {
+      const after = contentSegment(cursor, track)
+      if (after) segments.push(after)
+    }
+  }
   if (!segments.length) {
-    segments.push({ start: 0, end: track, kind: 'content' })
+    segments.push({ start: 0, end: track, kind: scanned && !scanned.length ? 'unscanned' : 'content' })
   }
   return segments
+}
+
+export function scannedRangesForEpisode(cues: TranscriptCue[], ranges?: TimeRange[] | null): TimeRange[] {
+  if (ranges?.length) return mergeRanges(ranges)
+  return rangesFromCues(cues)
 }
 
 export function segmentPlayedFraction(segment: ScrubberSegment, currentTime: number): number {

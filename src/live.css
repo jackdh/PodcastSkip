@@ -240,6 +240,8 @@ input[type='range']::-moz-range-thumb {
 }
 .scrubber-seg.ad { background: rgba(255, 69, 58, 0.35) }
 .scrubber-seg.ad::after { background: var(--ad) }
+.scrubber-seg.unscanned { background: rgba(255, 255, 255, 0.08) }
+.scrubber-seg.unscanned::after { background: rgba(255, 255, 255, 0.28) }
 .scrubber-thumb {
   position: absolute;
   top: 50%;
@@ -449,7 +451,7 @@ input[type='range']::-moz-range-thumb {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-auto-rows: min-content;
-  row-gap: 2px;
+  row-gap: 6px;
   width: min(400px, 100%);
   padding: 4px 0 0;
   overflow: visible;
@@ -486,21 +488,33 @@ input[type='range']::-moz-range-thumb {
 
 .now-transport {
   display: grid;
-  grid-template-columns: 48px 56px 64px 56px 48px;
-  justify-content: space-between;
+  grid-template-columns: 52px minmax(0, 1fr) 52px;
   align-items: center;
-  height: 64px;
+  width: 100%;
+  height: 72px;
   color: #fff;
 }
-.now-rate { font-size: 17px; font-weight: 700; justify-self: start }
+.now-rate {
+  font-size: 17px;
+  font-weight: 700;
+  justify-self: start;
+  min-width: 44px;
+  text-align: left;
+}
+.now-skip-group {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
 .now-skip {
   position: relative;
-  width: 48px;
-  height: 48px;
-  justify-self: center;
+  width: 52px;
+  height: 52px;
   display: grid;
   place-items: center;
   color: #fff;
+  flex: none;
 }
 .now-skip span {
   position: absolute;
@@ -514,10 +528,10 @@ input[type='range']::-moz-range-thumb {
 .now-play {
   width: 64px;
   height: 64px;
-  justify-self: center;
   display: grid;
   place-items: center;
   color: #fff;
+  flex: none;
 }
 .now-sleep {
   position: relative;
@@ -564,10 +578,12 @@ input[type='range']::-moz-range-thumb {
 .now-volume-fill {
   position: absolute;
   left: 0;
+  top: 50%;
   height: 3px;
   border-radius: 999px;
   background: #fff;
   pointer-events: none;
+  transform: translateY(-50%);
 }
 .now-volume-thumb {
   position: absolute;
@@ -582,12 +598,13 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 
+.now-footer,
 .now-dock {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) 44px;
   align-items: center;
-  height: 48px;
-  padding-top: 4px;
+  height: 44px;
+  padding-top: 2px;
 }
 .now-dock-btn.icon {
   width: 44px;
