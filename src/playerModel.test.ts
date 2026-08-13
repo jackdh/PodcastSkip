@@ -87,6 +87,17 @@ describe('transcript coverage', () => {
 })
 
 describe('buildScrubberSegments', () => {
+  it('keeps a long episode as one continuous bar, not a 12-block graph', () => {
+    const segments = buildScrubberSegments(TRIGGER_DURATION, [])
+    expect(segments).toEqual([{ start: 0, end: TRIGGER_DURATION, kind: 'content' }])
+  })
+
+  it('splits only on ads, like Apple chapter gaps', () => {
+    const segments = buildScrubberSegments(TRIGGER_DURATION, [{ start: 0, end: 45, label: 'preroll' }])
+    expect(segments.map((segment) => segment.kind)).toEqual(['ad', 'content'])
+    expect(segments).toHaveLength(2)
+  })
+
   it('renders a preroll ad as its own block so the bar can paint it red', () => {
     const ads: AdSegment[] = [{ start: 4, end: 55, label: 'preroll' }]
     const segments = buildScrubberSegments(TRIGGER_DURATION, ads)

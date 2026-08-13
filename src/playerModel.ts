@@ -96,20 +96,12 @@ export function mergeAdSegments(ads: AdSegment[]): AdSegment[] {
   return merged
 }
 
-function chunkContent(start: number, end: number, duration: number): ScrubberSegment[] {
-  const span = end - start
-  if (span <= 0.05) return []
-  const target = Math.max(duration / 12, 45)
-  if (span <= target * 1.4) return [{ start, end, kind: 'content' }]
-  const count = Math.max(2, Math.round(span / target))
-  const slice = span / count
-  return Array.from({ length: count }, (_, index) => ({
-    start: start + index * slice,
-    end: index === count - 1 ? end : start + (index + 1) * slice,
-    kind: 'content' as const,
-  }))
+function contentSegment(start: number, end: number): ScrubberSegment | null {
+  if (end - start <= 0.05) return null
+  return { start, end, kind: 'content' }
 }
 
+/** Chapter-style gaps: one bar per content/ad range. Never slice content into a bar graph. */
 export function buildScrubberSegments(duration: number, adSegments: AdSegment[]): ScrubberSegment[] {
   const track = duration > 0 && Number.isFinite(duration) ? duration : 1
   const ads = mergeAdSegments(adSegments)
@@ -123,18 +115,16 @@ export function buildScrubberSegments(duration: number, adSegments: AdSegment[])
   const segments: ScrubberSegment[] = []
   let cursor = 0
   for (const ad of ads) {
-    if (ad.start > cursor + 0.05) {
-      segments.push(...chunkContent(cursor, ad.start, track))
-    }
+    const before = contentSegment(cursor, ad.start)
+    if (before) segments.push(before)
     const adStart = Math.max(cursor, ad.start)
     if (ad.end > adStart + 0.05) {
       segments.push({ start: adStart, end: ad.end, kind: 'ad', label: ad.label })
       cursor = ad.end
     }
   }
-  if (cursor < track - 0.05) {
-    segments.push(...chunkContent(cursor, track, track))
-  }
+  const after = contentSegment(cursor, track)
+  if (after) segments.push(after)
   if (!segments.length) {
     segments.push({ start: 0, end: track, kind: 'content' })
   }

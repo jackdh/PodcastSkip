@@ -1,10 +1,11 @@
 import type { Preview } from '@storybook/react-vite'
 import '../src/styles.css'
+import '../src/live.css'
 
 const preview: Preview = {
   parameters: {
     layout: 'fullscreen',
-    backgrounds: { default: 'light' }
+    backgrounds: { default: 'dark', values: [{ name: 'dark', value: '#000000' }] }
   }
 }
 

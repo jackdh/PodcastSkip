@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Captions, ChevronDown, Download, LoaderCircle, Moon, MoreHorizontal,
-  Pause, Play, RotateCcw, RotateCw, Volume2, VolumeX, WandSparkles,
+  Captions, ChevronDown, Download, Headphones, LoaderCircle, Moon, MoreHorizontal,
+  Pause, Play, RotateCcw, RotateCw, Volume2, WandSparkles,
 } from 'lucide-react'
 import type { Episode } from './podcastApi'
 import type { AdSegment, TranscriptCue } from './openRouter'
@@ -21,13 +21,15 @@ import {
 } from './playerModel'
 
 const PLAYBACK_RATES = [1, 1.25, 1.5, 1.75, 2]
+const DISMISS_DISTANCE = 120
+const DISMISS_VELOCITY = 0.65
 
 type SeekHandler = (time: number, options?: { allowAds?: boolean }) => void
 
-function Cover({ artwork, label, compact = false }: { artwork?: string; label: string; compact?: boolean }) {
+function Cover({ artwork, label, size = 'card' }: { artwork?: string; label: string; size?: 'mini' | 'card' | 'hero' }) {
   return (
-    <div className={`art lime ${compact ? 'now-art' : ''}`}>
-      {artwork ? <img src={artwork} alt="" /> : <><span>{label.slice(0, 2).toUpperCase()}</span><i /></>}
+    <div className={`art ${size}`}>
+      {artwork ? <img src={artwork} alt="" /> : <span>{label.slice(0, 2).toUpperCase()}</span>}
     </div>
   )
 }
@@ -36,50 +38,72 @@ function SegmentedScrubber({
   currentTime,
   duration,
   fallbackLabel,
+  title,
   adSegments,
   onSeek,
   variant = 'full',
-  hint,
 }: {
   currentTime: number
   duration: number
   fallbackLabel: string
+  title?: string
   adSegments: AdSegment[]
   onSeek: SeekHandler
   variant?: 'full' | 'slim'
-  hint?: string
 }) {
-  const trackMax = duration || 1
+  const [seeking, setSeeking] = useState(false)
+  const [seekTime, setSeekTime] = useState(currentTime)
+  const trackMax = duration > 0 && Number.isFinite(duration) ? duration : 1
+  const displayTime = seeking ? seekTime : currentTime
+  const progress = Math.min(1, Math.max(0, displayTime / trackMax))
   const segments = buildScrubberSegments(duration, adSegments)
+  const tooltip = title || fallbackLabel
+
+  const commit = (value: number) => {
+    setSeekTime(value)
+    onSeek(value)
+  }
+
   return (
-    <div className={`scrubber scrubber-${variant}`}>
+    <div className={`scrubber scrubber-${variant} ${seeking ? 'seeking' : ''}`}>
+      {variant === 'full' && seeking && (
+        <div className="scrubber-tooltip" style={{ left: `${Math.min(92, Math.max(8, progress * 100))}%` }}>
+          <b>{tooltip}</b>
+          <span>{formatTime(displayTime)}</span>
+        </div>
+      )}
       <div className="scrubber-rail">
-        {segments.map((segment) => (
-          <i
-            key={`${segment.kind}-${segment.start}-${segment.end}`}
-            className={`scrubber-seg ${segment.kind}`}
-            style={{
-              flexGrow: Math.max(segment.end - segment.start, 0.4),
-              ['--played' as string]: `${segmentPlayedFraction(segment, currentTime) * 100}%`,
-            }}
-            title={segment.kind === 'ad' ? (segment.label ? `Ad: ${segment.label}` : 'Ad break') : undefined}
-          />
-        ))}
+        <div className="scrubber-track">
+          {segments.map((segment) => (
+            <i
+              key={`${segment.kind}-${segment.start}-${segment.end}`}
+              className={`scrubber-seg ${segment.kind}`}
+              style={{
+                flexGrow: Math.max(segment.end - segment.start, 0.4),
+                ['--played' as string]: `${segmentPlayedFraction(segment, displayTime) * 100}%`,
+              }}
+              title={segment.kind === 'ad' ? (segment.label ? `Ad: ${segment.label}` : 'Ad break') : undefined}
+            />
+          ))}
+        </div>
+        {variant === 'full' && <span className="scrubber-thumb" style={{ left: `clamp(6px, ${progress * 100}%, calc(100% - 6px))` }} />}
         <input
           aria-label="Playback progress"
           type="range"
           min="0"
           max={trackMax}
           step="0.1"
-          value={Math.min(currentTime, trackMax)}
-          onChange={(event) => onSeek(Number(event.target.value))}
+          value={Math.min(displayTime, trackMax)}
+          onPointerDown={() => { setSeeking(true); setSeekTime(currentTime) }}
+          onPointerUp={() => setSeeking(false)}
+          onPointerCancel={() => setSeeking(false)}
+          onChange={(event) => commit(Number(event.target.value))}
         />
       </div>
       {variant === 'full' && (
         <div className="scrubber-meta">
-          <span>{formatTime(currentTime)}</span>
-          <span className="scrubber-hint">{hint || (duration ? 'Scrub to jump' : fallbackLabel)}</span>
-          <span>{duration ? formatRemaining(currentTime, duration) : fallbackLabel}</span>
+          <span>{formatTime(displayTime)}</span>
+          <span>{duration ? formatRemaining(displayTime, duration) : fallbackLabel}</span>
         </div>
       )}
     </div>
@@ -90,14 +114,12 @@ function TranscriptFollow({
   cues,
   adSegments,
   currentTime,
-  title,
   pastCoverage,
   onSeek,
 }: {
   cues: TranscriptCue[]
   adSegments: AdSegment[]
   currentTime: number
-  title: string
   pastCoverage: boolean
   onSeek: SeekHandler
 }) {
@@ -117,7 +139,6 @@ function TranscriptFollow({
       onScroll={() => { userScrollAt.current = Date.now() }}
       onTouchStart={() => { userScrollAt.current = Date.now() }}
     >
-      <h2>{title}</h2>
       {cues.map((cue, index) => {
         const ad = cueOverlapsAd(cue, adSegments)
         const current = index === followedIndex
@@ -148,6 +169,80 @@ function TranscriptFollow({
       })}
     </div>
   )
+}
+
+function useSheetDismiss(active: boolean, onClose: () => void) {
+  const [offset, setOffset] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const drag = useRef<{ startY: number; lastY: number; lastT: number; vy: number; pointerId: number; moved: boolean } | null>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  useEffect(() => {
+    if (!active) {
+      setOffset(0)
+      setDragging(false)
+      drag.current = null
+    }
+  }, [active])
+
+  const onPointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('button, a, input, select, textarea') && !target.closest('.now-grab')) return
+    drag.current = {
+      startY: event.clientY,
+      lastY: event.clientY,
+      lastT: performance.now(),
+      vy: 0,
+      pointerId: event.pointerId,
+      moved: false,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const onPointerMove = (event: React.PointerEvent<HTMLElement>) => {
+    const state = drag.current
+    if (!state || event.pointerId !== state.pointerId) return
+    const dy = event.clientY - state.startY
+    if (!state.moved && Math.abs(dy) < 8) return
+    if (!state.moved && dy < 0) return
+    state.moved = true
+    const now = performance.now()
+    state.vy = (event.clientY - state.lastY) / Math.max(1, now - state.lastT)
+    state.lastY = event.clientY
+    state.lastT = now
+    setDragging(true)
+    setOffset(Math.max(0, dy))
+  }
+
+  const onPointerUp = (event: React.PointerEvent<HTMLElement>) => {
+    const state = drag.current
+    if (state && event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    drag.current = null
+    setDragging(false)
+    if (!state) return
+    const dy = Math.max(0, event.clientY - state.startY)
+    const tappedGrabber = !state.moved && !!(event.target as HTMLElement).closest('.now-grab')
+    if (tappedGrabber || (state.moved && (dy > DISMISS_DISTANCE || state.vy > DISMISS_VELOCITY))) {
+      onCloseRef.current()
+      return
+    }
+    setOffset(0)
+  }
+
+  return {
+    offset,
+    dragging,
+    bind: {
+      onPointerDown,
+      onPointerMove,
+      onPointerUp,
+      onPointerCancel: onPointerUp,
+    },
+  }
 }
 
 export function PlayerBar({
@@ -201,15 +296,26 @@ export function PlayerBar({
 }) {
   const [sleepMinutes, setSleepMinutes] = useState<number | null>(null)
   const [sleepUntil, setSleepUntil] = useState<number | null>(null)
+  const [showTranscript, setShowTranscript] = useState(true)
   const onPauseRef = useRef(onPause)
   onPauseRef.current = onPause
+  const sheet = useSheetDismiss(expanded, () => onExpandedChange(false))
 
   useEffect(() => {
     if (!expanded) return
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = previous }
-  }, [expanded])
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onExpandedChange(false) }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = previous
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [expanded, onExpandedChange])
+
+  useEffect(() => {
+    if (cues.length) setShowTranscript(true)
+  }, [episode?.id, cues.length])
 
   useEffect(() => {
     if (!sleepUntil) return
@@ -244,9 +350,7 @@ export function PlayerBar({
   const pastCoverage = isPlayheadPastTranscript(cues, currentTime)
   const scanRest = needsFullEpisodeScan(cues, analyseMinutes, duration)
   const coverageEnd = transcriptCoverageEnd(cues)
-  const adHint = adSegments.length
-    ? `${adSegments.length} ad ${adSegments.length === 1 ? 'break' : 'breaks'}`
-    : undefined
+  const transcriptOpen = showTranscript && cues.length > 0
 
   if (!expanded) {
     return (
@@ -256,6 +360,7 @@ export function PlayerBar({
             currentTime={currentTime}
             duration={duration}
             fallbackLabel={episode.duration}
+            title={episode.title}
             adSegments={adSegments}
             onSeek={onSeek}
             variant="slim"
@@ -263,20 +368,18 @@ export function PlayerBar({
         </div>
         <div className="player-bar-main">
           <button className="now" onClick={() => onExpandedChange(true)} aria-expanded={false} aria-label="Open now playing">
-            <Cover artwork={episode.artwork} label={episode.show} />
+            <Cover artwork={episode.artwork} label={episode.show} size="mini" />
             <div>
               <b>{episode.title}</b>
               <span>
                 {episode.show}
                 {adSegments.length ? ` · ${adSegments.length} ads` : ''}
                 {skipAds && adSegments.length ? ' · skipping' : ''}
-                {downloaded ? ' · Downloaded' : ''}
               </span>
             </div>
-            <ChevronDown size={16} />
           </button>
           <button className="player-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
-            {playing ? <Pause fill="currentColor" size={18} /> : <Play fill="currentColor" size={18} />}
+            {playing ? <Pause fill="currentColor" size={22} /> : <Play fill="currentColor" size={22} />}
           </button>
         </div>
       </div>
@@ -284,115 +387,149 @@ export function PlayerBar({
   }
 
   return (
-    <div className="now-playing">
-      <button className="now-grab" onClick={() => onExpandedChange(false)} aria-label="Close now playing">
-        <span />
-      </button>
-
-      <div className="now-card">
-        <Cover artwork={episode.artwork} label={episode.show} compact />
-        <div>
-          <b>{episode.title}</b>
-          <span>{episode.show}</span>
+    <div
+      className={`now-playing ${sheet.dragging ? 'dragging' : ''}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Now playing"
+      style={{ transform: sheet.offset ? `translateY(${sheet.offset}px)` : undefined }}
+    >
+      {episode.artwork ? (
+        <div className="now-backdrop" aria-hidden>
+          <img src={episode.artwork} alt="" />
         </div>
-        <button className="now-more" aria-label="Close now playing" onClick={() => onExpandedChange(false)}>
-          <MoreHorizontal size={18} />
-        </button>
+      ) : null}
+
+      <div className="now-chrome" {...sheet.bind}>
+        <div
+          className="now-grab"
+          role="button"
+          tabIndex={0}
+          aria-label="Close now playing"
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              onExpandedChange(false)
+            }
+          }}
+        >
+          <span />
+        </div>
+
+        <div className="now-card">
+          <Cover artwork={episode.artwork} label={episode.show} size="card" />
+          <div>
+            <b>{episode.show}</b>
+            {episode.author && episode.author !== 'Unknown creator' ? <span>{episode.author}</span> : <span>Podcast</span>}
+          </div>
+          <button className="now-more" aria-label="Close now playing" onClick={() => onExpandedChange(false)}>
+            <MoreHorizontal size={18} />
+          </button>
+          <button
+            className="now-episode-title"
+            type="button"
+            onClick={() => { if (cues.length) setShowTranscript((open) => !open) }}
+            aria-expanded={transcriptOpen}
+          >
+            <span>{episode.title}</span>
+            {cues.length ? <ChevronDown size={18} className={transcriptOpen ? '' : 'chevron-up'} /> : null}
+          </button>
+        </div>
       </div>
 
-      {cues.length > 0 ? (
+      {transcriptOpen ? (
         <TranscriptFollow
           cues={cues}
           adSegments={adSegments}
           currentTime={currentTime}
-          title={episode.title}
           pastCoverage={pastCoverage}
           onSeek={onSeek}
         />
       ) : (
-        <div className="now-transcript now-transcript-empty">
-          <h2>{episode.title}</h2>
-          <p>
-            {adSegments.length
-              ? 'Ads are marked but the spoken transcript was not saved. Re-scan audio to follow the words here — tap any word to jump.'
-              : downloaded
-                ? 'Highlight ads transcribes the downloaded audio. The current sentence stays in the middle as it plays.'
-                : 'Download this episode, then Highlight ads to transcribe the audio, skip breaks, and follow the words.'}
-          </p>
+        <div className="now-artwork-stage" {...sheet.bind}>
+          <Cover artwork={episode.artwork} label={episode.show} size="hero" />
         </div>
       )}
 
-      {(scanRest || pastCoverage) && (
-        <div className="now-coverage">
-          <span>
-            {pastCoverage
-              ? `Transcript ends at ${formatTime(coverageEnd)} — you are at ${formatTime(currentTime)}`
-              : `Ads and transcript only cover ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
-          </span>
-          <button type="button" disabled={detecting || !downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
-            {detecting ? 'Scanning…' : 'Scan entire episode'}
-          </button>
-        </div>
-      )}
-
-      <SegmentedScrubber
-        currentTime={currentTime}
-        duration={duration}
-        fallbackLabel={episode.duration}
-        adSegments={adSegments}
-        onSeek={onSeek}
-        hint={adHint ?? (detecting ? 'Scanning for ads…' : 'Highlight ads to mark breaks')}
-      />
-
-      <div className="now-transport">
-        <button className="now-rate" onClick={cycleRate} aria-label="Playback speed">{playbackRate}x</button>
-        <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
-          <RotateCcw size={28} strokeWidth={1.7} /><span>15</span>
-        </button>
-        <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
-          {playing ? <Pause fill="currentColor" size={36} /> : <Play fill="currentColor" size={36} />}
-        </button>
-        <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
-          <RotateCw size={28} strokeWidth={1.7} /><span>30</span>
-        </button>
-        <button className={`now-sleep ${sleepMinutes ? 'on' : ''}`} onClick={cycleSleep} aria-label="Sleep timer">
-          <Moon size={22} strokeWidth={1.7} />
-          {sleepMinutes ? <em>{sleepMinutes}m</em> : null}
-        </button>
-      </div>
-
-      <div className="now-volume">
-        {volume <= 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
-        <input
-          aria-label="Volume"
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={volume}
-          onChange={(event) => onVolumeChange(Number(event.target.value))}
-        />
-        <Volume2 size={20} />
-      </div>
-
-      <div className="now-dock">
-        <button className="now-dock-btn on" aria-label="Transcript" type="button">
-          <Captions size={20} />
-        </button>
-        <button className={`now-dock-btn ${skipAds ? 'on' : ''}`} onClick={() => onSkipAdsChange(!skipAds)}>
-          Skip ads {skipAds ? 'on' : 'off'}
-        </button>
-        {downloaded ? (
-          <button className="now-dock-btn" disabled={detecting} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
-            {detecting ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}
-            {detecting ? 'Scanning' : adSegments.length ? 'Re-scan' : 'Highlight'}
-          </button>
-        ) : (
-          <button className="now-dock-btn" disabled={downloading} onClick={onDownload}>
-            {downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
-            {downloading ? 'Saving' : 'Download'}
-          </button>
+      <div className="now-controls">
+        {(scanRest || pastCoverage) && (
+          <div className="now-coverage">
+            <span>
+              {pastCoverage
+                ? `Transcript ends at ${formatTime(coverageEnd)} — you are at ${formatTime(currentTime)}`
+                : `Ads and transcript only cover ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
+            </span>
+            <button type="button" disabled={detecting || !downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
+              {detecting ? 'Scanning…' : 'Scan entire episode'}
+            </button>
+          </div>
         )}
+
+        <SegmentedScrubber
+          currentTime={currentTime}
+          duration={duration}
+          fallbackLabel={episode.duration}
+          title={episode.title}
+          adSegments={adSegments}
+          onSeek={onSeek}
+        />
+
+        <div className="now-transport">
+          <button className="now-rate" onClick={cycleRate} aria-label="Playback speed">{playbackRate}x</button>
+          <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
+            <RotateCcw size={28} strokeWidth={1.6} /><span>15</span>
+          </button>
+          <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
+            {playing ? <Pause fill="currentColor" size={42} /> : <Play fill="currentColor" size={42} />}
+          </button>
+          <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
+            <RotateCw size={28} strokeWidth={1.6} /><span>30</span>
+          </button>
+          <button className={`now-sleep ${sleepMinutes ? 'on' : ''}`} onClick={cycleSleep} aria-label="Sleep timer">
+            <Moon size={22} strokeWidth={1.6} />
+            {sleepMinutes ? <em>{sleepMinutes}m</em> : null}
+          </button>
+        </div>
+
+        <div className="now-volume">
+          <Volume2 size={14} strokeWidth={1.8} />
+          <input
+            aria-label="Volume"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={volume}
+            style={{ ['--vol' as string]: `${Math.round(volume * 100)}%` }}
+            onChange={(event) => onVolumeChange(Number(event.target.value))}
+          />
+          <Volume2 size={20} strokeWidth={1.8} />
+        </div>
+
+        <div className="now-dock">
+          <button
+            className={`now-dock-btn icon ${transcriptOpen ? 'on' : ''}`}
+            aria-label="Transcript"
+            type="button"
+            onClick={() => setShowTranscript((open) => !open)}
+            disabled={!cues.length}
+          >
+            <Captions size={22} />
+          </button>
+          <button className={`now-dock-device ${skipAds ? 'on' : ''}`} onClick={() => onSkipAdsChange(!skipAds)}>
+            <Headphones size={22} strokeWidth={1.7} />
+            <span>Skip ads {skipAds ? 'on' : 'off'}</span>
+          </button>
+          {downloaded ? (
+            <button className="now-dock-btn icon" disabled={detecting} onClick={() => onHighlightAds?.({ windowMinutes: 0 })} aria-label={detecting ? 'Scanning' : adSegments.length ? 'Re-scan' : 'Highlight ads'}>
+              {detecting ? <LoaderCircle className="spin" size={20} /> : <WandSparkles size={20} />}
+            </button>
+          ) : (
+            <button className="now-dock-btn icon" disabled={downloading} onClick={onDownload} aria-label={downloading ? 'Saving' : 'Download'}>
+              {downloading ? <LoaderCircle className="spin" size={20} /> : <Download size={20} />}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
