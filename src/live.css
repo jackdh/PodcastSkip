@@ -454,11 +454,11 @@ input[type='range']::-moz-range-thumb {
   flex: 0 0 auto;
   align-items: stretch;
   align-self: center;
-  gap: 8px;
+  gap: 10px;
   width: min(400px, 100%);
   max-width: 100%;
   min-width: 0;
-  padding: 8px 0 0;
+  padding: 10px 0 0;
   overflow: visible;
 }
 .now-controls > * {
@@ -483,6 +483,9 @@ input[type='range']::-moz-range-thumb {
   font-size: 12px;
   line-height: 1.35;
   color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .now-coverage button {
   flex: none;
@@ -508,9 +511,9 @@ input[type='range']::-moz-range-thumb {
   width: 100%;
   min-width: 0;
 }
-.now-playing .scrubber-rail { height: 22px; max-height: 22px }
-.now-playing .scrubber-track,
-.now-playing .scrubber-seg { height: 4px; max-height: 4px }
+.now-playing .scrubber-rail { height: 24px; max-height: 24px }
+.now-playing .scrubber-track { height: 5px; max-height: 5px; gap: 2px }
+.now-playing .scrubber-seg { height: 5px; max-height: 5px }
 .now-playing .scrubber.seeking .scrubber-thumb { width: 14px; height: 14px; margin-left: -7px }
 
 .now-transport {
@@ -634,7 +637,7 @@ input[type='range']::-moz-range-thumb {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) 44px;
   align-items: center;
-  height: 48px;
+  height: 44px;
   padding-top: 2px;
 }
 .now-dock-btn.icon {
@@ -651,9 +654,13 @@ input[type='range']::-moz-range-thumb {
 }
 .now-dock-btn:disabled { opacity: 0.4 }
 .now-dock-device {
-  display: grid;
-  justify-items: center;
-  gap: 1px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  gap: 6px;
+  height: 44px;
   color: rgba(255, 255, 255, 0.7);
 }
 .now-dock-device span { font-size: 11px; font-weight: 600 }

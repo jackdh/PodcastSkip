@@ -591,7 +591,7 @@ export function PlayerBar({
             <Captions size={22} />
           </button>
           <button className={`now-dock-device ${skipAds ? 'on' : ''}`} onClick={() => onSkipAdsChange(!skipAds)}>
-            <Headphones size={20} strokeWidth={1.7} />
+            <Headphones size={18} strokeWidth={1.7} />
             <span>Skip ads {skipAds ? 'on' : 'off'}</span>
           </button>
           {downloaded ? (
