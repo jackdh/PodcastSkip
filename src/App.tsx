@@ -19,7 +19,8 @@ import {
 } from './openRouter'
 import { forceAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
-import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
+import { deleteTranscript, loadAllScans, saveScan, scanRecordFromCues, type CueMap, type ScanMap } from './transcriptStore'
+import { coverageEnd } from './scanCache'
 import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
 import { readStoredSettings, writeStoredSettings } from './settingsStore'
 import { adSkipTarget } from './adParse'
@@ -76,8 +77,7 @@ function App() {
     try { return JSON.parse(localStorage.getItem('podflow-ad-segments') ?? '{}') as AdSegmentMap }
     catch { return {} }
   })
-  const [cuesByEpisode, setCuesByEpisode] = useState<CueMap>({})
-  const [transcriptsReady, setTranscriptsReady] = useState(false)
+  const [scansByEpisode, setScansByEpisode] = useState<ScanMap>({})
   const [secondsSaved, setSecondsSaved] = useState(() => {
     const saved = Number(localStorage.getItem('podflow-seconds-saved') ?? 0)
     return Number.isFinite(saved) ? saved : 0
@@ -93,6 +93,7 @@ function App() {
   const adSegmentsRef = useRef<AdSegment[]>([])
   const skippedAdKeysRef = useRef<Set<string>>(new Set())
   const activeEpisodeIdRef = useRef<string | null>(null)
+  const wantPlayingRef = useRef(false)
   const refreshStorageUsage = async () => {
     if (!navigator.storage?.estimate) return
     const { usage = 0, quota = 0 } = await navigator.storage.estimate()
@@ -144,29 +145,25 @@ function App() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      let fromIdb: CueMap = {}
-      try { fromIdb = await loadAllTranscripts() } catch { /* IndexedDB may be blocked. */ }
-      let merged = fromIdb
+      let scans: ScanMap = {}
+      try { scans = await loadAllScans() } catch { /* IndexedDB may be blocked. */ }
       try {
         const raw = localStorage.getItem('podflow-transcript-cues')
         if (raw) {
           const parsed = JSON.parse(raw) as CueMap
-          merged = { ...parsed, ...fromIdb }
+          for (const [id, cues] of Object.entries(parsed)) {
+            if (!scans[id] && cues.length) scans[id] = scanRecordFromCues(cues)
+          }
           localStorage.removeItem('podflow-transcript-cues')
+          await Promise.all(Object.entries(scans).map(([id, record]) => saveScan(id, record))).catch(() => undefined)
         }
       } catch { /* Ignore a bad legacy cache. */ }
       if (!cancelled) {
-        setCuesByEpisode((current) => ({ ...merged, ...current }))
-        setTranscriptsReady(true)
+        setScansByEpisode((current) => ({ ...scans, ...current }))
       }
     })()
     return () => { cancelled = true }
   }, [])
-
-  useEffect(() => {
-    if (!transcriptsReady) return
-    void saveAllTranscripts(cuesByEpisode).catch(() => undefined)
-  }, [cuesByEpisode, transcriptsReady])
 
   useEffect(() => {
     localStorage.setItem('podflow-seconds-saved', String(secondsSaved))
@@ -265,16 +262,37 @@ function App() {
     let cancelled = false
     let objectUrl: string | null = null
     let audio: HTMLAudioElement | null = null
+    let recoverAttempts = 0
+
+    const persistPosition = (time: number) => {
+      if (!episode) return
+      localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: time, updatedAt: Date.now() }))
+    }
+
+    const blobUrlFromCache = async () => {
+      if (!('caches' in window)) return null
+      try {
+        const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
+        if (!cached) return null
+        const blob = await cached.blob()
+        const copy = blob.slice(0, blob.size, blob.type || 'audio/mpeg')
+        return URL.createObjectURL(copy)
+      } catch {
+        return null
+      }
+    }
 
     const attachAudio = (playableUrl: string) => {
       if (cancelled) return
+      audio?.pause()
       audio = new Audio(playableUrl)
-      audio.preload = 'metadata'
+      audio.preload = 'auto'
       audio.playbackRate = playbackRateRef.current
       audio.volume = volumeRef.current
       let lastPersisted = 0
       audio.addEventListener('loadedmetadata', () => {
         if (!audio) return
+        recoverAttempts = 0
         setAudioDuration(audio.duration)
         const resume = pendingResumeRef.current
         let position = 0
@@ -289,6 +307,12 @@ function App() {
         if (position > 0) {
           audio.currentTime = position
           setCurrentTime(position)
+        }
+        if (wantPlayingRef.current) {
+          void audio.play().catch(() => {
+            wantPlayingRef.current = false
+            setPlaying(false)
+          })
         }
       })
       audio.addEventListener('timeupdate', () => {
@@ -311,40 +335,76 @@ function App() {
         setCurrentTime(time)
         if (Math.abs(time - lastPersisted) >= 5) {
           lastPersisted = time
-          localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: time, updatedAt: Date.now() }))
+          persistPosition(time)
         }
       })
-      audio.addEventListener('play', () => setPlaying(true))
+      audio.addEventListener('play', () => {
+        wantPlayingRef.current = true
+        setPlaying(true)
+      })
       audio.addEventListener('pause', () => setPlaying(false))
-      audio.addEventListener('ended', () => setPlaying(false))
+      audio.addEventListener('ended', () => {
+        wantPlayingRef.current = false
+        setPlaying(false)
+      })
       audio.addEventListener('error', () => {
         setPlaying(false)
-        setToast('This publisher does not allow playback in the browser.')
+        void recoverPlayback('error')
       })
       audioRef.current = audio
     }
 
-    const resolvePlayableUrl = async () => {
-      if ('caches' in window) {
-        try {
-          const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
-          if (cancelled) return
-          if (cached) {
-            objectUrl = URL.createObjectURL(await cached.blob())
-            attachAudio(objectUrl)
-            return
-          }
-        } catch {
-          /* Fall through to network playback. */
-        }
+    const recoverPlayback = async (reason: string) => {
+      if (cancelled || recoverAttempts >= 2 || !episode) {
+        if (recoverAttempts >= 2) setToast('Playback could not be restored. Tap play to try again.')
+        return
       }
-      if (!cancelled) attachAudio(source)
+      recoverAttempts += 1
+      const position = audio?.currentTime || pendingResumeRef.current?.position || 0
+      if (position > 0) pendingResumeRef.current = { id: episode.id, position }
+      appLog('warn', 'audio recover', { reason, position, attempt: recoverAttempts })
+      const nextUrl = await blobUrlFromCache()
+      if (cancelled) return
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      objectUrl = nextUrl
+      attachAudio(nextUrl || source)
+    }
+
+    const onForeground = () => {
+      if (document.visibilityState === 'hidden') return
+      const current = audioRef.current
+      if (!current) return
+      const broken = Boolean(current.error) || current.networkState === HTMLMediaElement.NETWORK_NO_SOURCE || current.readyState === 0
+      if (broken) void recoverPlayback('foreground')
+    }
+
+    const onPageHide = () => {
+      const time = audioRef.current?.currentTime ?? 0
+      if (time > 0) persistPosition(time)
+    }
+
+    document.addEventListener('visibilitychange', onForeground)
+    window.addEventListener('pageshow', onForeground)
+    window.addEventListener('pagehide', onPageHide)
+
+    const resolvePlayableUrl = async () => {
+      const cachedUrl = await blobUrlFromCache()
+      if (cancelled) return
+      if (cachedUrl) {
+        objectUrl = cachedUrl
+        attachAudio(cachedUrl)
+        return
+      }
+      attachAudio(source)
     }
 
     void resolvePlayableUrl()
 
     return () => {
       cancelled = true
+      document.removeEventListener('visibilitychange', onForeground)
+      window.removeEventListener('pageshow', onForeground)
+      window.removeEventListener('pagehide', onPageHide)
       audio?.pause()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
@@ -365,8 +425,8 @@ function App() {
     const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler) => {
       try { navigator.mediaSession.setActionHandler(action, handler) } catch { /* Unsupported action. */ }
     }
-    setHandler('play', () => { void audioRef.current?.play() })
-    setHandler('pause', () => audioRef.current?.pause())
+    setHandler('play', () => { wantPlayingRef.current = true; void audioRef.current?.play() })
+    setHandler('pause', () => { wantPlayingRef.current = false; audioRef.current?.pause() })
     setHandler('seekbackward', (details) => seekTo(Math.max(0, (audioRef.current?.currentTime ?? 0) - (details.seekOffset ?? 15))))
     setHandler('seekforward', (details) => seekTo(Math.min(audioRef.current?.duration ?? 0, (audioRef.current?.currentTime ?? 0) + (details.seekOffset ?? 30))))
     setHandler('seekto', (details) => details.seekTime !== undefined && seekTo(details.seekTime))
@@ -389,7 +449,7 @@ function App() {
         delete next[episode.id]
         return next
       })
-      setCuesByEpisode((current) => {
+      setScansByEpisode((current) => {
         if (!(episode.id in current)) return current
         const next = { ...current }
         delete next[episode.id]
@@ -419,9 +479,18 @@ function App() {
   const togglePlayback = async () => {
     const audio = audioRef.current
     if (!audio) { setToast('Choose an episode with playable audio first.'); return }
-    if (playing) { audio.pause(); setPlaying(false); return }
+    if (playing) {
+      wantPlayingRef.current = false
+      audio.pause()
+      setPlaying(false)
+      return
+    }
+    wantPlayingRef.current = true
     try { await audio.play(); setPlaying(true) }
-    catch { setToast('Playback was blocked. Tap play again to start listening.') }
+    catch {
+      wantPlayingRef.current = false
+      setToast('Playback was blocked. Tap play again to start listening.')
+    }
   }
   const seekTo = (time: number, options?: { allowAds?: boolean }) => {
     let next = time
@@ -467,6 +536,7 @@ function App() {
     }
   }
   const pausePlayback = () => {
+    wantPlayingRef.current = false
     audioRef.current?.pause()
     setPlaying(false)
   }
@@ -500,9 +570,14 @@ function App() {
       if (!cached) throw new Error('Download this episode first so we can analyse the audio.')
       const audioBlob = await cached.blob()
       appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
+      const stored = await loadAllScans().catch(() => ({} as ScanMap))
+      const cachedScan = scansByEpisode[episode.id] ?? stored[episode.id]
+      const reuseCache = Boolean(cachedScan && (!cachedScan.sttModel || cachedScan.sttModel === sttModel))
       const windowLabel = windowMinutes > 0 ? `the first ${windowMinutes} minutes` : 'the full episode'
-      setToast(`Analysing ${windowLabel} of “${episode.title}”…`)
-      const { segments, cues } = await detectAdSegmentsFromAudio({
+      setToast(reuseCache && cachedScan?.ranges.length
+        ? `Checking cache, then analysing ${windowLabel} of “${episode.title}”…`
+        : `Analysing ${windowLabel} of “${episode.title}”…`)
+      const { segments, cues, durationSeconds, fullDuration, ranges } = await detectAdSegmentsFromAudio({
         apiKey,
         model,
         sttModel,
@@ -511,11 +586,35 @@ function App() {
         description: episode.description,
         audioBlob,
         maxMinutes: windowMinutes > 0 ? windowMinutes : undefined,
+        existingCues: reuseCache ? cachedScan?.cues : undefined,
+        existingRanges: reuseCache ? cachedScan?.ranges : undefined,
+        existingAds: reuseCache ? adSegmentsByEpisode[episode.id] : undefined,
+        adsAnalyzedThrough: reuseCache ? cachedScan?.adsAnalyzedThrough : undefined,
         onProgress: (message) => setToast(message),
+        onPartial: ({ cues: partialCues, ranges: partialRanges }) => {
+          const record = scanRecordFromCues(partialCues, {
+            sttModel,
+            duration: cachedScan?.duration ?? 0,
+            ranges: partialRanges,
+            adsAnalyzedThrough: reuseCache ? (cachedScan?.adsAnalyzedThrough ?? 0) : 0,
+          })
+          setScansByEpisode((current) => ({ ...current, [episode.id]: record }))
+          void saveScan(episode.id, record).catch(() => undefined)
+        },
+      })
+      const analyzedThrough = Math.max(
+        reuseCache ? (cachedScan?.adsAnalyzedThrough ?? 0) : 0,
+        coverageEnd(ranges),
+      )
+      const record = scanRecordFromCues(cues, {
+        sttModel,
+        duration: Math.max(fullDuration, cachedScan?.duration ?? 0, durationSeconds),
+        ranges,
+        adsAnalyzedThrough: analyzedThrough,
       })
       setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
-      setCuesByEpisode((current) => ({ ...current, [episode.id]: cues }))
-      void saveTranscript(episode.id, cues).catch(() => undefined)
+      setScansByEpisode((current) => ({ ...current, [episode.id]: record }))
+      void saveScan(episode.id, record).catch(() => undefined)
       setActiveEpisode(episode)
       setPlayerOpen(true)
       const windowNote = windowMinutes > 0 ? ` in the first ${windowMinutes} minutes` : ''
@@ -543,8 +642,11 @@ function App() {
   const downloadBytesById = Object.fromEntries(
     downloadedEpisodes.map((episode) => [episode.id, episode.downloadBytes ?? 0]),
   )
+  const cuesByEpisode: CueMap = Object.fromEntries(
+    Object.entries(scansByEpisode).map(([id, record]) => [id, record.cues]),
+  )
   const activeAdSegments = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
-  const activeCues = activeEpisode ? (cuesByEpisode[activeEpisode.id] ?? []) : []
+  const activeCues = activeEpisode ? (scansByEpisode[activeEpisode.id]?.cues ?? []) : []
 
   return <main>
     <aside className="sidebar">
