@@ -383,7 +383,7 @@ export function PlayerBar({
           Skip ads {skipAds ? 'on' : 'off'}
         </button>
         {downloaded ? (
-          <button className="now-dock-btn" disabled={detecting} onClick={() => onHighlightAds?.()}>
+          <button className="now-dock-btn" disabled={detecting} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
             {detecting ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}
             {detecting ? 'Scanning' : adSegments.length ? 'Re-scan' : 'Highlight'}
           </button>

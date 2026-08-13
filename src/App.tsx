@@ -22,6 +22,7 @@ import { PlayerBar } from './Player'
 import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
 import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
 import { readStoredSettings, writeStoredSettings } from './settingsStore'
+import { adSkipTarget } from './adParse'
 
 type AdSegmentMap = Record<string, AdSegment[]>
 const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 30, 0] as const
@@ -282,8 +283,8 @@ function App() {
         }
         pendingResumeRef.current = null
         if (skipAdsRef.current) {
-          const hit = adSegmentsRef.current.find((segment) => position >= segment.start && position < segment.end - 0.35)
-          if (hit) position = hit.end
+          const skipTo = adSkipTarget(position, adSegmentsRef.current)
+          if (skipTo != null) position = skipTo
         }
         if (position > 0) {
           audio.currentTime = position
@@ -294,12 +295,12 @@ function App() {
         if (!audio) return
         let time = audio.currentTime
         if (skipAdsRef.current) {
-          const hit = adSegmentsRef.current.find((segment) => time >= segment.start && time < segment.end - 0.35)
-          if (hit) {
-            const skipped = Math.max(0, hit.end - time)
-            const skipKey = `${activeEpisodeIdRef.current}:${hit.start}-${hit.end}`
-            audio.currentTime = hit.end
-            time = hit.end
+          const skipTo = adSkipTarget(time, adSegmentsRef.current)
+          if (skipTo != null) {
+            const skipped = Math.max(0, skipTo - time)
+            const skipKey = `${activeEpisodeIdRef.current}:${skipTo}`
+            audio.currentTime = skipTo
+            time = skipTo
             if (skipped > 0.5 && !skippedAdKeysRef.current.has(skipKey)) {
               skippedAdKeysRef.current.add(skipKey)
               setSecondsSaved((total) => total + skipped)
@@ -428,11 +429,11 @@ function App() {
       const segments = adSegmentsRef.current.length
         ? adSegmentsRef.current
         : (adSegmentsByEpisode[activeEpisode.id] ?? [])
-      const hit = segments.find((segment) => next >= segment.start && next < segment.end - 0.35)
-      if (hit) {
-        const skipped = Math.max(0, hit.end - next)
-        const skipKey = `${activeEpisode.id}:${hit.start}-${hit.end}`
-        next = hit.end
+      const skipTo = adSkipTarget(next, segments)
+      if (skipTo != null) {
+        const skipped = Math.max(0, skipTo - next)
+        const skipKey = `${activeEpisode.id}:${skipTo}`
+        next = skipTo
         if (skipped > 0.5 && !skippedAdKeysRef.current.has(skipKey)) {
           skippedAdKeysRef.current.add(skipKey)
           setSecondsSaved((total) => total + skipped)
@@ -754,7 +755,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
             ))}
           </select>
         </label>
-          <div className="key-note"><Sparkles size={15}/><span>Highlight ads transcribes this window of the downloaded audio, then marks ads from that speech. Publisher transcripts are ignored. Mid-roll ads after the window will not be marked. Default is 30 minutes so typical mid-rolls are included without transcribing a full 90-minute episode. Use Entire episode from now playing if you are past the scanned region.</span></div>
+          <div className="key-note"><Sparkles size={15}/><span>Highlight ads from now playing transcribes the whole downloaded episode so mid-rolls are included. This window still applies when you highlight from Downloads, to save credits on a phone test. Publisher transcripts are ignored.</span></div>
         <div className="credit">
           <span>OpenRouter status</span>
           <strong>{keyStatus ? `Connected · ${formatCredits(keyStatus.limitRemaining)}` : apiKey ? 'Not checked yet' : 'Add your key to connect'}</strong>

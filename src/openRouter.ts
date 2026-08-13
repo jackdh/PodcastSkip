@@ -1,5 +1,6 @@
 import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, readAudioDuration, sliceBlobByTime, audioFormatFromBlob, createAudioContext } from './audioTranscript'
-import { coerceMinuteClocks, refineAdSegments } from './adRefine'
+import { refineAdSegments } from './adRefine'
+import { mergeOverlappingSegments, normalizeSegments } from './adParse'
 import { appLog, memorySnapshot } from './appLog'
 
 export type AdSegment = {
@@ -103,122 +104,6 @@ function extractJsonObject(text: string): unknown {
     if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1))
     throw new Error('Model did not return valid JSON.')
   }
-}
-
-function cueIndexFromRaw(raw: unknown, cueCount: number): number | undefined {
-  const value = Number(raw)
-  if (!Number.isInteger(value)) return undefined
-  // Prompt uses 1-based #ids. Accept 0-based only when the value cannot be 1-based.
-  if (value >= 1 && value <= cueCount) return value - 1
-  if (value === 0) return 0
-  return undefined
-}
-
-function segmentFromCueRange(
-  startIndex: number,
-  endIndex: number,
-  cues: TranscriptCue[],
-  label?: string,
-): AdSegment | null {
-  if (startIndex < 0 || endIndex < startIndex || endIndex >= cues.length) return null
-  const start = cues[startIndex].start
-  const end = cues[endIndex].end
-  if (!(end > start)) return null
-  return { start, end, label }
-}
-
-function parseTimeField(raw: unknown): number {
-  if (typeof raw === 'string') {
-    const clock = raw.trim().match(/^(\d+):([0-5]?\d)(?:\.\d+)?$/)
-    if (clock) return Number(clock[1]) * 60 + Number(clock[2])
-  }
-  return Number(raw)
-}
-
-function segmentFromSeconds(
-  start: number,
-  end: number,
-  durationSeconds: number,
-  cues: TranscriptCue[],
-  label?: string,
-): AdSegment | null {
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
-  if (!cues.length) {
-    const clampedStart = Math.max(0, Math.min(start, durationSeconds))
-    const clampedEnd = Math.max(clampedStart + 1, Math.min(end, durationSeconds))
-    if (clampedEnd - clampedStart < 2) return null
-    return { start: clampedStart, end: clampedEnd, label }
-  }
-
-  const overlapping = cues
-    .map((cue, index) => ({ cue, index }))
-    .filter(({ cue }) => cue.start < end && cue.end > start)
-  if (!overlapping.length) return null
-
-  // Prefer cues whose midpoint sits inside the predicted range so a slightly
-  // long end time does not swallow the first news sentence after an ad.
-  const interior = overlapping.filter(({ cue }) => {
-    const mid = (cue.start + cue.end) / 2
-    return mid >= start && mid <= end
-  })
-  const chosen = interior.length ? interior : overlapping
-  return segmentFromCueRange(chosen[0].index, chosen[chosen.length - 1].index, cues, label)
-}
-
-function normalizeSegments(raw: unknown, durationSeconds: number, cues: TranscriptCue[] = []): AdSegment[] {
-  const list = Array.isArray(raw)
-    ? raw
-    : raw && typeof raw === 'object' && Array.isArray((raw as { segments?: unknown }).segments)
-      ? (raw as { segments: unknown[] }).segments
-      : null
-  if (!list) throw new Error('Model response was missing ad segments.')
-
-  const segments: AdSegment[] = []
-  for (const item of list) {
-    if (!item || typeof item !== 'object') continue
-    const record = item as Record<string, unknown>
-    const label = typeof record.label === 'string'
-      ? record.label
-      : typeof record.type === 'string' ? record.type : undefined
-    const startCue = cueIndexFromRaw(record.startCue ?? record.start_cue ?? record.fromCue, cues.length)
-    const endCue = cueIndexFromRaw(record.endCue ?? record.end_cue ?? record.toCue, cues.length)
-    const fromCues = startCue !== undefined && endCue !== undefined
-      ? segmentFromCueRange(startCue, endCue, cues, label)
-      : null
-    const rawStart = parseTimeField(record.start ?? record.startSeconds ?? record.from)
-    const rawEnd = parseTimeField(record.end ?? record.endSeconds ?? record.to)
-    const clock = coerceMinuteClocks(rawStart, rawEnd, durationSeconds)
-    const fromSeconds = segmentFromSeconds(
-      clock.start,
-      clock.end,
-      durationSeconds,
-      cues,
-      label,
-    )
-    const segment = fromCues ?? fromSeconds
-    if (!segment || segment.end - segment.start < 2) continue
-    const clampedStart = Math.max(0, Math.min(segment.start, durationSeconds))
-    const clampedEnd = Math.max(clampedStart + 1, Math.min(segment.end, durationSeconds))
-    if (clampedEnd - clampedStart < 2) continue
-    segments.push({ start: clampedStart, end: clampedEnd, label: segment.label })
-  }
-  return mergeOverlappingSegments(segments.sort((a, b) => a.start - b.start))
-}
-
-function mergeOverlappingSegments(segments: AdSegment[]): AdSegment[] {
-  if (!segments.length) return []
-  const merged: AdSegment[] = [{ ...segments[0] }]
-  for (let i = 1; i < segments.length; i += 1) {
-    const current = segments[i]
-    const last = merged[merged.length - 1]
-    if (current.start <= last.end + 1.5) {
-      last.end = Math.max(last.end, current.end)
-      if (current.label && !last.label) last.label = current.label
-    } else {
-      merged.push({ ...current })
-    }
-  }
-  return merged
 }
 
 function formatCueClock(seconds: number): string {
@@ -415,6 +300,9 @@ export async function detectAdSegmentsFromTranscript(options: {
     cues: options.cues.length,
     windows: windows.length,
     duration: Number(options.durationSeconds.toFixed(1)),
+    coverage: options.cues.length
+      ? `${formatCueClock(options.cues[0].start)}-${formatCueClock(options.cues[options.cues.length - 1].end)}`
+      : 'none',
   })
   for (let index = 0; index < windows.length; index += 1) {
     if (windows.length > 1) options.onProgress?.(`Finding ad breaks ${index + 1}/${windows.length}…`)
@@ -428,8 +316,9 @@ Return ONLY JSON:
 
 Rules:
 - startCue and endCue are inclusive cue ids from the # numbers below (1 through ${lastCueId})
-- Those ids are NOT clock minutes: #20 is cue twenty, not 20:00
-- Do not invent ids or round to whole minutes; copy ids from the transcript
+- Those ids are NOT clock minutes or seconds: #20 is cue twenty, not 0:20 or 20:00
+- start/end are also allowed if they copy those # ids or the [m:ss] clocks printed on each line
+- Do not invent ids or round to whole minutes; copy ids or clocks from the transcript
 - Mark the FULL sponsor read: cold-open sales copy, "brought to you by", the product pitch, discount/URL closer, and the last commercial sentence
 - Do NOT mark show intros/outros, headlines, or news/host copy that is not selling something
 - Stop at the last commercial sentence. The first cue that returns to the story/news is NOT part of the ad
@@ -471,7 +360,17 @@ ${transcript}`
     const content = payload.choices?.[0]?.message?.content
     if (!content) throw new Error('OpenRouter returned an empty response.')
 
-    collected.push(...normalizeSegments(extractJsonObject(content), options.durationSeconds, windowCues))
+    const parsed = normalizeSegments(extractJsonObject(content), options.durationSeconds, windowCues)
+    appLog('info', 'ad analysis model reply', {
+      window: index + 1,
+      raw: content.slice(0, 1200),
+      parsed: parsed.map((segment) => ({
+        start: Number(segment.start.toFixed(1)),
+        end: Number(segment.end.toFixed(1)),
+        label: segment.label,
+      })),
+    })
+    collected.push(...parsed)
   }
 
   const merged = refineAdSegments(mergeOverlappingSegments(collected.sort((a, b) => a.start - b.start)), options.cues)
