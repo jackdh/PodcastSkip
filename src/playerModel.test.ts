@@ -9,6 +9,8 @@ import {
   isPlayheadPastTranscript,
   needsFullEpisodeScan,
   nextSleepMinutes,
+  scanCoverageLabel,
+  scannedRangesForEpisode,
   segmentPlayedFraction,
   transcriptCoverageEnd,
   wordsFromCue,
@@ -84,6 +86,13 @@ describe('transcript coverage', () => {
     expect(needsFullEpisodeScan([], 8, TRIGGER_DURATION)).toBe(false)
     expect(needsFullEpisodeScan(eightMinuteCues, 8, 8 * 60)).toBe(false)
   })
+
+  it('labels partial vs full scan coverage for the player caption', () => {
+    const scanned = scannedRangesForEpisode(eightMinuteCues)
+    expect(scanned).toEqual([{ start: 0, end: 8 * 60 }])
+    expect(scanCoverageLabel(scanned, TRIGGER_DURATION)).toBe('8:00 scanned')
+    expect(scanCoverageLabel([{ start: 0, end: TRIGGER_DURATION }], TRIGGER_DURATION)).toBeNull()
+  })
 })
 
 describe('buildScrubberSegments', () => {
@@ -136,7 +145,16 @@ describe('buildScrubberSegments', () => {
     expect(adBlocks[0].end).toBe(30)
   })
 
-  it('fills played fraction across a segment', () => {
+  it('paints audio past the transcript as dim unscanned, not more content', () => {
+    const scanned = [{ start: 0, end: 8 * 60 }]
+    const segments = buildScrubberSegments(TRIGGER_DURATION, [{ start: 4, end: 55, label: 'preroll' }], scanned)
+    expect(segments.map((segment) => segment.kind)).toEqual(['content', 'ad', 'content', 'unscanned'])
+    expect(segments.at(-1)).toMatchObject({ start: 8 * 60, end: TRIGGER_DURATION, kind: 'unscanned' })
+  })
+})
+
+describe('segmentPlayedFraction', () => {
+  it('returns 0, a mid-segment fraction, and 1', () => {
     const segment = { start: 10, end: 20, kind: 'content' as const }
     expect(segmentPlayedFraction(segment, 5)).toBe(0)
     expect(segmentPlayedFraction(segment, 15)).toBe(0.5)

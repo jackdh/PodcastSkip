@@ -19,7 +19,9 @@ import {
 } from './openRouter'
 import { forceAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
-import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
+import { deleteTranscript, loadAllScans, saveScan, scanRecordFromCues, type CueMap, type ScanMap } from './transcriptStore'
+import { coverageEnd } from './scanCache'
+import { scannedRangesForEpisode } from './playerModel'
 import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
 import { readStoredSettings, writeStoredSettings } from './settingsStore'
 import { adSkipTarget } from './adParse'
@@ -76,8 +78,7 @@ function App() {
     try { return JSON.parse(localStorage.getItem('podflow-ad-segments') ?? '{}') as AdSegmentMap }
     catch { return {} }
   })
-  const [cuesByEpisode, setCuesByEpisode] = useState<CueMap>({})
-  const [transcriptsReady, setTranscriptsReady] = useState(false)
+  const [scansByEpisode, setScansByEpisode] = useState<ScanMap>({})
   const [secondsSaved, setSecondsSaved] = useState(() => {
     const saved = Number(localStorage.getItem('podflow-seconds-saved') ?? 0)
     return Number.isFinite(saved) ? saved : 0
@@ -144,29 +145,25 @@ function App() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      let fromIdb: CueMap = {}
-      try { fromIdb = await loadAllTranscripts() } catch { /* IndexedDB may be blocked. */ }
-      let merged = fromIdb
+      let scans: ScanMap = {}
+      try { scans = await loadAllScans() } catch { /* IndexedDB may be blocked. */ }
       try {
         const raw = localStorage.getItem('podflow-transcript-cues')
         if (raw) {
           const parsed = JSON.parse(raw) as CueMap
-          merged = { ...parsed, ...fromIdb }
+          for (const [id, cues] of Object.entries(parsed)) {
+            if (!scans[id] && cues.length) scans[id] = scanRecordFromCues(cues)
+          }
           localStorage.removeItem('podflow-transcript-cues')
+          await Promise.all(Object.entries(scans).map(([id, record]) => saveScan(id, record))).catch(() => undefined)
         }
       } catch { /* Ignore a bad legacy cache. */ }
       if (!cancelled) {
-        setCuesByEpisode((current) => ({ ...merged, ...current }))
-        setTranscriptsReady(true)
+        setScansByEpisode((current) => ({ ...scans, ...current }))
       }
     })()
     return () => { cancelled = true }
   }, [])
-
-  useEffect(() => {
-    if (!transcriptsReady) return
-    void saveAllTranscripts(cuesByEpisode).catch(() => undefined)
-  }, [cuesByEpisode, transcriptsReady])
 
   useEffect(() => {
     localStorage.setItem('podflow-seconds-saved', String(secondsSaved))
@@ -389,7 +386,7 @@ function App() {
         delete next[episode.id]
         return next
       })
-      setCuesByEpisode((current) => {
+      setScansByEpisode((current) => {
         if (!(episode.id in current)) return current
         const next = { ...current }
         delete next[episode.id]
@@ -500,9 +497,14 @@ function App() {
       if (!cached) throw new Error('Download this episode first so we can analyse the audio.')
       const audioBlob = await cached.blob()
       appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
+      const stored = await loadAllScans().catch(() => ({} as ScanMap))
+      const cachedScan = scansByEpisode[episode.id] ?? stored[episode.id]
+      const reuseCache = Boolean(cachedScan && (!cachedScan.sttModel || cachedScan.sttModel === sttModel))
       const windowLabel = windowMinutes > 0 ? `the first ${windowMinutes} minutes` : 'the full episode'
-      setToast(`Analysing ${windowLabel} of “${episode.title}”…`)
-      const { segments, cues } = await detectAdSegmentsFromAudio({
+      setToast(reuseCache && cachedScan?.ranges.length
+        ? `Checking cache, then analysing ${windowLabel} of “${episode.title}”…`
+        : `Analysing ${windowLabel} of “${episode.title}”…`)
+      const { segments, cues, durationSeconds, fullDuration, ranges } = await detectAdSegmentsFromAudio({
         apiKey,
         model,
         sttModel,
@@ -511,11 +513,25 @@ function App() {
         description: episode.description,
         audioBlob,
         maxMinutes: windowMinutes > 0 ? windowMinutes : undefined,
+        existingCues: reuseCache ? cachedScan?.cues : undefined,
+        existingRanges: reuseCache ? cachedScan?.ranges : undefined,
+        existingAds: reuseCache ? adSegmentsByEpisode[episode.id] : undefined,
+        adsAnalyzedThrough: reuseCache ? cachedScan?.adsAnalyzedThrough : undefined,
         onProgress: (message) => setToast(message),
       })
+      const analyzedThrough = Math.max(
+        reuseCache ? (cachedScan?.adsAnalyzedThrough ?? 0) : 0,
+        coverageEnd(ranges),
+      )
+      const record = scanRecordFromCues(cues, {
+        sttModel,
+        duration: Math.max(fullDuration, cachedScan?.duration ?? 0, durationSeconds),
+        ranges,
+        adsAnalyzedThrough: analyzedThrough,
+      })
       setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
-      setCuesByEpisode((current) => ({ ...current, [episode.id]: cues }))
-      void saveTranscript(episode.id, cues).catch(() => undefined)
+      setScansByEpisode((current) => ({ ...current, [episode.id]: record }))
+      void saveScan(episode.id, record).catch(() => undefined)
       setActiveEpisode(episode)
       setPlayerOpen(true)
       const windowNote = windowMinutes > 0 ? ` in the first ${windowMinutes} minutes` : ''
@@ -543,8 +559,13 @@ function App() {
   const downloadBytesById = Object.fromEntries(
     downloadedEpisodes.map((episode) => [episode.id, episode.downloadBytes ?? 0]),
   )
+  const cuesByEpisode: CueMap = Object.fromEntries(
+    Object.entries(scansByEpisode).map(([id, record]) => [id, record.cues]),
+  )
   const activeAdSegments = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
-  const activeCues = activeEpisode ? (cuesByEpisode[activeEpisode.id] ?? []) : []
+  const activeScan = activeEpisode ? scansByEpisode[activeEpisode.id] : undefined
+  const activeCues = activeScan?.cues ?? []
+  const activeRanges = activeCues.length ? scannedRangesForEpisode(activeCues, activeScan?.ranges) : undefined
 
   return <main>
     <aside className="sidebar">
@@ -592,6 +613,7 @@ function App() {
       onSeek={seekTo}
       adSegments={activeAdSegments}
       cues={activeCues}
+      scannedRanges={activeRanges}
       downloaded={Boolean(activeEpisode && downloaded.includes(activeEpisode.id))}
       skipAds={skipAds}
       onSkipAdsChange={setSkipAds}
