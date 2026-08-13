@@ -48,8 +48,9 @@ OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
 1. Sends the cached episode audio to OpenRouter speech-to-text (Whisper by
    default, or Qwen3 ASR Flash) in short chunks with timed transcript
    segments. The request body is WAV bytes from the download, not a remote
-   transcript URL. Settings can limit this to the first N minutes (default 8)
-   so a phone test does not transcribe a full episode.
+   transcript URL. Settings can limit this to the first N minutes (default 30)
+   so a phone test does not transcribe a full episode. Now playing warns when
+   playback is past the scanned region and offers a full-episode re-scan.
 2. Asks your chosen analysis model (DeepSeek V4 Flash by default) to mark
    advertisement ranges from numbered transcript cues (not free-form clocks).
    transcript cues (not free-form clocks). Predicted ranges are snapped onto
@@ -94,3 +95,11 @@ Clock-snap helper (no API key):
 ```bash
 npm run test:ad-refine
 ```
+
+## Tests
+
+```bash
+npm test
+```
+
+Runs Vitest unit tests for transcript follow, the segmented ad scrubber, and scan-coverage, plus the existing ad-refine and settings-store checks. Live OpenRouter detection stays `npm run test:ad-detect` and is not part of CI.

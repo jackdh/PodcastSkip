@@ -24,7 +24,8 @@ import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
 import { readStoredSettings, writeStoredSettings } from './settingsStore'
 
 type AdSegmentMap = Record<string, AdSegment[]>
-const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 0] as const
+const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 30, 0] as const
+const DEFAULT_ANALYSE_MINUTES = 30
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
 const downloadCacheName = 'podflow-downloads-v1'
@@ -59,12 +60,13 @@ function App() {
   const [sttModel, setSttModel] = useState(storedSettings.sttModel ?? DEFAULT_STT_MODEL)
   const [analyseMinutes, setAnalyseMinutes] = useState(() => {
     const minutes = Number(storedSettings.analyseMinutes)
-    return Number.isFinite(minutes) ? minutes : 8
+    return Number.isFinite(minutes) ? minutes : DEFAULT_ANALYSE_MINUTES
   })
   const [playbackRate, setPlaybackRate] = useState(() => {
     const rate = Number(storedSettings.playbackRate)
     return rate > 0 ? rate : 1
   })
+  const [volume, setVolume] = useState(1)
   const [toast, setToast] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
@@ -86,6 +88,7 @@ function App() {
   const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
   const skipAdsRef = useRef(skipAds)
   const playbackRateRef = useRef(playbackRate)
+  const volumeRef = useRef(volume)
   const adSegmentsRef = useRef<AdSegment[]>([])
   const skippedAdKeysRef = useRef<Set<string>>(new Set())
   const activeEpisodeIdRef = useRef<string | null>(null)
@@ -102,7 +105,7 @@ function App() {
     setSttModel(saved.sttModel ?? DEFAULT_STT_MODEL)
     setApiKey(saved.apiKey ?? '')
     const minutes = Number(saved.analyseMinutes)
-    setAnalyseMinutes(Number.isFinite(minutes) ? minutes : 8)
+    setAnalyseMinutes(Number.isFinite(minutes) ? minutes : DEFAULT_ANALYSE_MINUTES)
     const rate = Number(saved.playbackRate)
     setPlaybackRate(rate > 0 ? rate : 1)
     try {
@@ -176,6 +179,11 @@ function App() {
     playbackRateRef.current = playbackRate
     if (audioRef.current) audioRef.current.playbackRate = playbackRate
   }, [playbackRate])
+
+  useEffect(() => {
+    volumeRef.current = volume
+    if (audioRef.current) audioRef.current.volume = volume
+  }, [volume])
 
   useEffect(() => {
     adSegmentsRef.current = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
@@ -262,6 +270,7 @@ function App() {
       audio = new Audio(playableUrl)
       audio.preload = 'metadata'
       audio.playbackRate = playbackRateRef.current
+      audio.volume = volumeRef.current
       let lastPersisted = 0
       audio.addEventListener('loadedmetadata', () => {
         if (!audio) return
@@ -456,7 +465,11 @@ function App() {
       setToast(error instanceof Error ? error.message : 'Could not connect to OpenRouter.')
     }
   }
-  const highlightAds = async (episode: Episode) => {
+  const pausePlayback = () => {
+    audioRef.current?.pause()
+    setPlaying(false)
+  }
+  const highlightAds = async (episode: Episode, options?: { windowMinutes?: number }) => {
     if (detectingAds.includes(episode.id)) return
     if (!apiKey.trim()) {
       setToast('Add an OpenRouter API key in Settings first.')
@@ -470,12 +483,13 @@ function App() {
       return
     }
     setDetectingAds((items) => [...items, episode.id])
+    const windowMinutes = options?.windowMinutes ?? analyseMinutes
     setToast(`Preparing audio for “${episode.title}”…`)
     appLog('info', 'highlight ads start', {
       title: episode.title,
       show: episode.show,
       id: episode.id,
-      analyseMinutes,
+      analyseMinutes: windowMinutes,
       model,
       sttModel,
       memory: memorySnapshot(),
@@ -485,7 +499,7 @@ function App() {
       if (!cached) throw new Error('Download this episode first so we can analyse the audio.')
       const audioBlob = await cached.blob()
       appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
-      const windowLabel = analyseMinutes > 0 ? `the first ${analyseMinutes} minutes` : 'the full episode'
+      const windowLabel = windowMinutes > 0 ? `the first ${windowMinutes} minutes` : 'the full episode'
       setToast(`Analysing ${windowLabel} of “${episode.title}”…`)
       const { segments, cues } = await detectAdSegmentsFromAudio({
         apiKey,
@@ -495,7 +509,7 @@ function App() {
         show: episode.show,
         description: episode.description,
         audioBlob,
-        maxMinutes: analyseMinutes > 0 ? analyseMinutes : undefined,
+        maxMinutes: windowMinutes > 0 ? windowMinutes : undefined,
         onProgress: (message) => setToast(message),
       })
       setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
@@ -503,7 +517,7 @@ function App() {
       void saveTranscript(episode.id, cues).catch(() => undefined)
       setActiveEpisode(episode)
       setPlayerOpen(true)
-      const windowNote = analyseMinutes > 0 ? ` in the first ${analyseMinutes} minutes` : ''
+      const windowNote = windowMinutes > 0 ? ` in the first ${windowMinutes} minutes` : ''
       setToast(segments.length
         ? `Marked ${segments.length} ad ${segments.length === 1 ? 'segment' : 'segments'}${windowNote}`
         : `No ad segments found${windowNote}`)
@@ -571,6 +585,7 @@ function App() {
       episode={activeEpisode}
       playing={playing}
       onPlay={togglePlayback}
+      onPause={pausePlayback}
       currentTime={currentTime}
       duration={audioDuration}
       onSeek={seekTo}
@@ -580,11 +595,14 @@ function App() {
       skipAds={skipAds}
       onSkipAdsChange={setSkipAds}
       detecting={Boolean(activeEpisode && detectingAds.includes(activeEpisode.id))}
-      onHighlightAds={() => { if (activeEpisode) void highlightAds(activeEpisode) }}
+      onHighlightAds={(options) => { if (activeEpisode) void highlightAds(activeEpisode, options) }}
       onDownload={() => { if (activeEpisode) void downloadEpisode(activeEpisode) }}
       downloading={Boolean(activeEpisode && downloading.includes(activeEpisode.id))}
       playbackRate={playbackRate}
       onPlaybackRateChange={setPlaybackRate}
+      volume={volume}
+      onVolumeChange={setVolume}
+      analyseMinutes={analyseMinutes}
       expanded={playerOpen}
       onExpandedChange={setPlayerOpen}
     />
@@ -736,7 +754,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
             ))}
           </select>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>Highlight ads transcribes this window of the downloaded audio, then marks ads from that speech. Publisher transcripts are ignored. Mid-roll ads after the window will not be marked. Default is 8 minutes so phone tests do not burn a full episode.</span></div>
+          <div className="key-note"><Sparkles size={15}/><span>Highlight ads transcribes this window of the downloaded audio, then marks ads from that speech. Publisher transcripts are ignored. Mid-roll ads after the window will not be marked. Default is 30 minutes so typical mid-rolls are included without transcribing a full 90-minute episode. Use Entire episode from now playing if you are past the scanned region.</span></div>
         <div className="credit">
           <span>OpenRouter status</span>
           <strong>{keyStatus ? `Connected · ${formatCredits(keyStatus.limitRemaining)}` : apiKey ? 'Not checked yet' : 'Add your key to connect'}</strong>

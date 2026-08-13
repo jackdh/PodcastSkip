@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { audioProxyPlugin } from './audioProxyPlugin.ts'
@@ -34,5 +34,9 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,ico}']
       }
     })])
-  ]
+  ],
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
+  },
 })

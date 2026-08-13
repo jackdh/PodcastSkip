@@ -10,6 +10,9 @@
     "preview": "vite preview",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
+    "test": "vitest run && npm run test:ad-refine && npm run test:settings-store",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
     "test:ad-detect": "tsx scripts/ad-detect-once.ts",
     "test:ad-refine": "tsx scripts/ad-refine-check.ts",
     "test:settings-store": "tsx scripts/settings-store-check.ts"
@@ -34,6 +37,7 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.65.0",
     "vite": "^8.1.5",
-    "vite-plugin-pwa": "^1.3.0"
+    "vite-plugin-pwa": "^1.3.0",
+    "vitest": "^4.1.10"
   }
 }
