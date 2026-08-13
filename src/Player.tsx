@@ -86,7 +86,7 @@ function SegmentedScrubber({
             />
           ))}
         </div>
-        {variant === 'full' && <span className="scrubber-thumb" style={{ left: `${progress * 100}%` }} />}
+        {variant === 'full' && <span className="scrubber-thumb" style={{ left: `clamp(6px, ${progress * 100}%, calc(100% - 6px))` }} />}
         <input
           aria-label="Playback progress"
           type="range"
@@ -420,7 +420,7 @@ export function PlayerBar({
           <Cover artwork={episode.artwork} label={episode.show} size="card" />
           <div>
             <b>{episode.show}</b>
-            <span>{episode.author}</span>
+            {episode.author && episode.author !== 'Unknown creator' ? <span>{episode.author}</span> : <span>Podcast</span>}
           </div>
           <button className="now-more" aria-label="Close now playing" onClick={() => onExpandedChange(false)}>
             <MoreHorizontal size={18} />
@@ -448,15 +448,6 @@ export function PlayerBar({
       ) : (
         <div className="now-artwork-stage" {...sheet.bind}>
           <Cover artwork={episode.artwork} label={episode.show} size="hero" />
-          {!cues.length && (
-            <p>
-              {adSegments.length
-                ? 'Ads are marked but the spoken transcript was not saved. Re-scan audio to follow the words here — tap any word to jump.'
-                : downloaded
-                  ? 'Highlight ads transcribes the downloaded audio. The current sentence stays in the middle as it plays.'
-                  : 'Download this episode, then Highlight ads to transcribe the audio, skip breaks, and follow the words.'}
-            </p>
-          )}
         </div>
       )}
 

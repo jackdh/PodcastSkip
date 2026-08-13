@@ -310,7 +310,7 @@ header {
   width: 58px;
   height: 58px;
   background: var(--bg-fill);
-  color: var(--tint);
+  color: var(--secondary);
   border-radius: 16px;
   display: grid;
   place-items: center;
