@@ -561,15 +561,17 @@ export function PlayerBar({
 
         <div className="now-transport">
           <button className="now-rate" onClick={cycleRate} aria-label="Playback speed">{playbackRate}x</button>
-          <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
-            <RotateCcw size={26} strokeWidth={1.6} /><span>15</span>
-          </button>
-          <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
-            {playing ? <Pause fill="currentColor" size={38} /> : <Play fill="currentColor" size={38} />}
-          </button>
-          <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
-            <RotateCw size={26} strokeWidth={1.6} /><span>30</span>
-          </button>
+          <div className="now-skip-group">
+            <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
+              <RotateCcw size={28} strokeWidth={1.55} /><span>15</span>
+            </button>
+            <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
+              {playing ? <Pause fill="currentColor" size={36} /> : <Play fill="currentColor" size={36} />}
+            </button>
+            <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
+              <RotateCw size={28} strokeWidth={1.55} /><span>30</span>
+            </button>
+          </div>
           <button className={`now-sleep ${sleepMinutes ? 'on' : ''}`} onClick={cycleSleep} aria-label="Sleep timer">
             <Moon size={20} strokeWidth={1.6} />
             {sleepMinutes ? <em>{sleepMinutes}m</em> : null}
