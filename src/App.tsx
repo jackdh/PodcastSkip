@@ -1002,7 +1002,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
         <label>Speech-to-text
           <select value={sttModel} onChange={e => setSttModel(e.target.value)}>
             <option value={DEFAULT_STT_MODEL}>Whisper — timed cues (recommended)</option>
-            <option value={QWEN_STT_MODEL}>Qwen3 ASR Flash — often clearer ads, 15s clocks</option>
+            <option value={QWEN_STT_MODEL}>Qwen3 ASR Flash — clearer ads, 15s clips in parallel</option>
           </select>
         </label>
         <label>Analysis model <a href="https://openrouter.ai/models" target="_blank">Compare models ↗</a>

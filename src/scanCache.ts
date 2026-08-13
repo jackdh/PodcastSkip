@@ -116,6 +116,39 @@ export function createTaskQueue() {
   }
 }
 
+/** Like createTaskQueue, but up to `limit` tasks run at once. */
+export function createPool(limit: number) {
+  const cap = Math.max(1, limit)
+  let active = 0
+  const waiting: Array<() => void> = []
+
+  const acquire = () => new Promise<void>((resolve) => {
+    if (active < cap) {
+      active += 1
+      resolve()
+      return
+    }
+    waiting.push(() => {
+      active += 1
+      resolve()
+    })
+  })
+
+  const release = () => {
+    active -= 1
+    waiting.shift()?.()
+  }
+
+  return async function enqueue<T>(task: () => Promise<T> | T): Promise<T> {
+    await acquire()
+    try {
+      return await task()
+    } finally {
+      release()
+    }
+  }
+}
+
 export function abortError(message = 'Scan cancelled') {
   const error = new Error(message)
   error.name = 'AbortError'
