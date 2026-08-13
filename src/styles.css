@@ -194,6 +194,34 @@ header {
   font-size: 13px;
   line-height: 1.4;
 }
+.update-banner {
+  margin: 0 36px 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--tint-soft);
+  color: var(--label);
+  font-size: 13px;
+  line-height: 1.4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.update-banner span { flex: 1 1 180px; min-width: 0 }
+.update-banner button {
+  flex: none;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--tint);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+.update-banner button.later {
+  background: transparent;
+  color: var(--tint);
+}
 .show-back {
   color: var(--tint);
   font-size: 13px;
@@ -553,6 +581,7 @@ body:has(.now-playing) .toast {
   .search-wrap { width: auto; flex: 1 }
   .search kbd { display: none }
   .offline-banner { margin: 0 18px 8px }
+  .update-banner { margin: 0 18px 8px }
   .page { padding: 8px 18px 30px }
   .page > h1,
   .library-page h1,

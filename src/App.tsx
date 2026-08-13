@@ -18,7 +18,7 @@ import {
   type KeyStatus,
   type TranscriptCue,
 } from './openRouter'
-import { forceAppUpdate } from './pwa'
+import { applyAppUpdate, dismissAppUpdate, forceAppUpdate, subscribeAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
 import {
   cuesFromScans,
@@ -108,6 +108,7 @@ function App() {
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null)
   const [settingsReady, setSettingsReady] = useState(false)
   const [offline, setOffline] = useState(() => typeof navigator !== 'undefined' && navigator.onLine === false)
+  const [updateReady, setUpdateReady] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
   const skipAdsRef = useRef(skipAds)
@@ -274,6 +275,8 @@ function App() {
       window.removeEventListener('offline', onOffline)
     }
   }, [])
+
+  useEffect(() => subscribeAppUpdate(setUpdateReady), [])
 
   useEffect(() => {
     let cancelled = false
@@ -810,6 +813,13 @@ function App() {
         </div>
       </header>
 
+      {updateReady && (
+        <div className="update-banner" role="status">
+          <span>A new version of Podflow is ready. Reloading keeps downloads and settings on this device.</span>
+          <button type="button" onClick={() => void applyAppUpdate()}>Reload</button>
+          <button type="button" className="later" onClick={() => dismissAppUpdate()}>Later</button>
+        </div>
+      )}
       {offline && <p className="offline-banner">You are offline. Downloaded episodes still play; search and new episodes need a connection.</p>}
       {tab === 'Home' && <HomeView shows={followedShows} onSelect={openShowTimeline} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineForView} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} downloadProgress={downloadProgress} search="" timeline timelineStatus={timelineStatus} activeEpisodeId={activeEpisode?.id} focusedShow={focusedShow} onClearFocus={() => setFocusedShowId(null)} offline={offline} />}
@@ -1028,6 +1038,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
           {updating ? 'Updating…' : 'Force update'}
         </button>
         <p className="app-version">Version {__APP_VERSION__} · Updated {formatBuildDate(__BUILD_TIME__)}</p>
+        <p className="key-note"><Sparkles size={15}/><span>When a new build is waiting, Podflow shows a Reload banner instead of refreshing by itself. Force update still checks now and reloads.</span></p>
       </div>
     </div>
   )

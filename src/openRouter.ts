@@ -1,4 +1,5 @@
-import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, readAudioDuration, sliceBlobByTime, audioFormatFromBlob, createAudioContext } from './audioTranscript'
+import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, readAudioDuration, audioFormatFromBlob, createAudioContext } from './audioTranscript'
+import { indexAudioBlob, sliceBySeekIndex } from './audioSeek'
 import { refineAdSegments } from './adRefine'
 import { mergeOverlappingSegments, normalizeSegments } from './adParse'
 import { appLog, memorySnapshot } from './appLog'
@@ -597,6 +598,10 @@ export async function transcribeEpisodeBlob(options: {
     return { cues, durationSeconds: windowSeconds, ranges: mergeRanges(cached) }
   }
 
+  options.onProgress?.('Indexing episode audio…')
+  const seekIndex = await indexAudioBlob(blob, fullDuration)
+  appLog('info', 'audio index', { kind: seekIndex.kind, points: seekIndex.points.length })
+
   options.onProgress?.(skippedChunks
     ? `Transcribing ${needed.length} remaining chunks (${skippedChunks} already saved)…`
     : `Transcribing downloaded audio 0/${needed.length}…`)
@@ -615,11 +620,13 @@ export async function transcribeEpisodeBlob(options: {
   try {
     await runPool(needed, STT_CONCURRENCY, async (range) => {
       throwIfAborted(options.signal)
-      const slice = sliceBlobByTime(blob, fullDuration, range.start, range.end)
+      const slice = sliceBySeekIndex(blob, seekIndex, range.start, range.end)
       appLog('info', 'chunk', {
         start: Number(range.start.toFixed(1)),
         end: Number(range.end.toFixed(1)),
+        offset: Number(slice.offsetSeconds.toFixed(1)),
         sliceBytes: slice.blob.size,
+        seek: seekIndex.kind,
         memory: memorySnapshot(),
       })
       let chunkCues: TranscriptCue[] = []

@@ -100,23 +100,7 @@ export function audioFormatFromBlob(blob: Blob): 'mp3' | 'm4a' | 'wav' | 'ogg' |
   return 'mp3'
 }
 
-export function sliceBlobByTime(
-  blob: Blob,
-  durationSeconds: number,
-  startSeconds: number,
-  endSeconds: number,
-  padSeconds = 0.35,
-) {
-  const paddedStart = Math.max(0, startSeconds - padSeconds)
-  const paddedEnd = Math.min(durationSeconds, endSeconds + padSeconds)
-  const startByte = Math.floor((paddedStart / durationSeconds) * blob.size)
-  const endByte = Math.max(startByte + 1024, Math.ceil((paddedEnd / durationSeconds) * blob.size))
-  return {
-    blob: blob.slice(startByte, Math.min(blob.size, endByte)),
-    offsetSeconds: paddedStart,
-    durationSeconds: Math.max(0.5, paddedEnd - paddedStart),
-  }
-}
+export { sliceBlobByTime } from './audioSeek'
 
 export function createAudioContext(): AudioContext {
   const Ctor = window.AudioContext

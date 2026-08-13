@@ -15,7 +15,7 @@ export default defineConfig({
     audioProxyPlugin(),
     react(),
     ...(process.env.STORYBOOK ? [] : [VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       manifest: {
         name: 'Podflow — intelligent podcasts',
         short_name: 'Podflow',
