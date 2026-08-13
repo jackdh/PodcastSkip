@@ -712,8 +712,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
           <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password" autoComplete="off"/>
         </label>
-        <div className="key-note"><Sparkles size={15}/><span>The key stays on this device across app updates. It is never sent anywhere except OpenRouter when you Highlight ads or Test connection.</span></div>
-        <div className="key-note"><Sparkles size={15}/><span>1. Paste your key. 2. Download an episode. 3. Highlight ads transcribes that audio — we never use a publisher transcript URL, because those leave ads out. 4. Play: red marks skip, and the words follow along.</span></div>
+        <div className="key-note"><Sparkles size={15}/><span>The key stays on this device across app updates. 1. Paste it once. 2. Download an episode. 3. Highlight ads transcribes that audio — we never use a publisher transcript URL. 4. Play: red marks skip, and the words follow along.</span></div>
         <label>Speech-to-text
           <select value={sttModel} onChange={e => setSttModel(e.target.value)}>
             <option value={DEFAULT_STT_MODEL}>Whisper — timed cues (recommended)</option>
