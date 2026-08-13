@@ -462,9 +462,14 @@ header {
   display: flex;
   align-items: center;
   gap: 8px;
-  z-index: 40;
+  z-index: 80;
   font-size: 14px;
   box-shadow: 0 8px 28px #0007;
+  max-width: min(360px, calc(100vw - 32px));
+}
+body:has(.now-playing) .toast {
+  top: calc(64px + env(safe-area-inset-top));
+  bottom: auto;
 }
 
 .mobile-nav { display: none }
