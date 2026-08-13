@@ -24,11 +24,18 @@
 }
 
 * { box-sizing: border-box }
-html, body, #root { min-height: 100%; min-height: 100dvh }
+html, body, #root, main {
+  height: 100%;
+  overflow: hidden;
+}
+html { height: 100dvh; height: 100svh }
 body {
   margin: 0;
+  position: fixed;
+  inset: 0;
+  width: 100%;
   background: var(--bg);
-  overscroll-behavior-y: none;
+  overscroll-behavior: none;
   -webkit-tap-highlight-color: transparent;
 }
 button, input, select, textarea { font: inherit; color: inherit }
@@ -36,7 +43,12 @@ button { cursor: pointer; border: 0; background: none }
 button, a, input, select { touch-action: manipulation }
 img { max-width: 100% }
 
-main { min-height: 100vh; min-height: 100dvh; background: var(--bg) }
+main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
 
 .sidebar {
   width: 232px;
@@ -112,7 +124,15 @@ main { min-height: 100vh; min-height: 100dvh; background: var(--bg) }
 }
 .avatar.small { width: 30px; height: 30px; font-size: 10px }
 
-.content { margin-left: 232px; padding-bottom: 120px }
+.content {
+  margin-left: 232px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
 header {
   height: 68px;
   display: flex;
@@ -476,7 +496,10 @@ body:has(.now-playing) .toast {
 
 @media (max-width: 800px) {
   .sidebar { display: none }
-  .content { margin: 0; padding-bottom: calc(138px + env(safe-area-inset-bottom)) }
+  .content {
+    margin: 0;
+    padding-bottom: 12px;
+  }
   header {
     height: calc(58px + env(safe-area-inset-top));
     padding: 0 16px;
@@ -505,12 +528,14 @@ body:has(.now-playing) .toast {
   .episode-row { gap: 12px }
   .show-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 14px }
   .mobile-nav {
-    position: fixed;
+    position: relative;
     z-index: 6;
     display: flex;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    flex: none;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    width: 100%;
     height: calc(54px + env(safe-area-inset-bottom));
     padding-bottom: env(safe-area-inset-bottom);
     background: var(--tabbar);
