@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Bell, Check, ChevronDown, Download, Headphones, Home,
+  Bell, Check, ChevronDown, Copy, Download, Headphones, Home,
   Library, LoaderCircle, MoreHorizontal, Play, Plus, Search,
   Settings, Sparkles, WandSparkles
 } from 'lucide-react'
@@ -20,6 +20,7 @@ import {
 import { forceAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
 import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
+import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
 
 type AdSegmentMap = Record<string, AdSegment[]>
 const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 0] as const
@@ -89,15 +90,19 @@ function App() {
   useEffect(() => {
     const saved = localStorage.getItem('podflow-settings')
     if (saved) {
-      const parsed = JSON.parse(saved)
-      setSkipAds(parsed.skipAds ?? true)
-      setModel(parsed.model ?? DEFAULT_ANALYSIS_MODEL)
-      setSttModel(parsed.sttModel ?? DEFAULT_STT_MODEL)
-      setApiKey(parsed.apiKey ?? '')
-      const minutes = Number(parsed.analyseMinutes)
-      setAnalyseMinutes(Number.isFinite(minutes) ? minutes : 8)
-      const rate = Number(parsed.playbackRate)
-      setPlaybackRate(rate > 0 ? rate : 1)
+      try {
+        const parsed = JSON.parse(saved)
+        setSkipAds(parsed.skipAds ?? true)
+        setModel(parsed.model ?? DEFAULT_ANALYSIS_MODEL)
+        setSttModel(parsed.sttModel ?? DEFAULT_STT_MODEL)
+        setApiKey(parsed.apiKey ?? '')
+        const minutes = Number(parsed.analyseMinutes)
+        setAnalyseMinutes(Number.isFinite(minutes) ? minutes : 8)
+        const rate = Number(parsed.playbackRate)
+        setPlaybackRate(rate > 0 ? rate : 1)
+      } catch (error) {
+        appLog('warn', 'settings parse failed', { message: error instanceof Error ? error.message : String(error) })
+      }
     }
     try {
       const nowPlaying = JSON.parse(localStorage.getItem('podflow-now-playing') ?? 'null') as { episode?: Episode; position?: number } | null
@@ -111,7 +116,11 @@ function App() {
 
   useEffect(() => {
     if (!settingsReady) return
-    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
+    try {
+      localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
+    } catch (error) {
+      appLog('error', 'settings persist failed', { message: error instanceof Error ? error.message : String(error) })
+    }
   }, [settingsReady, skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate])
 
   useEffect(() => {
@@ -120,7 +129,11 @@ function App() {
   }, [downloadedEpisodes])
 
   useEffect(() => {
-    localStorage.setItem('podflow-ad-segments', JSON.stringify(adSegmentsByEpisode))
+    try {
+      localStorage.setItem('podflow-ad-segments', JSON.stringify(adSegmentsByEpisode))
+    } catch (error) {
+      appLog('error', 'ad segments persist failed', { message: error instanceof Error ? error.message : String(error) })
+    }
   }, [adSegmentsByEpisode])
 
   useEffect(() => {
@@ -457,10 +470,20 @@ function App() {
     }
     setDetectingAds((items) => [...items, episode.id])
     setToast(`Preparing audio for “${episode.title}”…`)
+    appLog('info', 'highlight ads start', {
+      title: episode.title,
+      show: episode.show,
+      id: episode.id,
+      analyseMinutes,
+      model,
+      sttModel,
+      memory: memorySnapshot(),
+    })
     try {
       const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
       if (!cached) throw new Error('Download this episode first so we can analyse the audio.')
       const audioBlob = await cached.blob()
+      appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
       const windowLabel = analyseMinutes > 0 ? `the first ${analyseMinutes} minutes` : 'the full episode'
       setToast(`Analysing ${windowLabel} of “${episode.title}”…`)
       const { segments, cues } = await detectAdSegmentsFromAudio({
@@ -483,7 +506,17 @@ function App() {
       setToast(segments.length
         ? `Marked ${segments.length} ad ${segments.length === 1 ? 'segment' : 'segments'}${windowNote}`
         : `No ad segments found${windowNote}`)
+      appLog('info', 'highlight ads done', {
+        segments: segments.length,
+        cues: cues.length,
+        memory: memorySnapshot(),
+      })
     } catch (error) {
+      appLog('error', 'highlight ads failed', {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        memory: memorySnapshot(),
+      })
       setToast(error instanceof Error ? error.message : 'Ad detection failed.')
     } finally {
       setDetectingAds((items) => items.filter((id) => id !== episode.id))
@@ -611,6 +644,7 @@ function formatBuildDate(iso: string) {
 function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttModel, skipAds, setSkipAds, analyseMinutes, setAnalyseMinutes, onSave, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; sttModel: string; setSttModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; analyseMinutes: number; setAnalyseMinutes: (v: number) => void; onSave: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
   const [updating, setUpdating] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [copyingLogs, setCopyingLogs] = useState(false)
 
   const handleForceUpdate = async () => {
     if (updating) return
@@ -631,6 +665,20 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
       await onTestConnection()
     } finally {
       setTesting(false)
+    }
+  }
+
+  const handleCopyLogs = async () => {
+    if (copyingLogs) return
+    setCopyingLogs(true)
+    try {
+      await copyDebugLogs()
+      onToast('Logs copied — paste them into the chat')
+    } catch (error) {
+      appLog('error', 'copy logs failed', { message: error instanceof Error ? error.message : String(error) })
+      onToast('Could not copy logs. Try again from Safari, not the Home Screen icon.')
+    } finally {
+      setCopyingLogs(false)
     }
   }
 
@@ -695,6 +743,13 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
         <button className="test-connection" onClick={() => void handleTestConnection()} disabled={testing || !apiKey.trim()}>
           {testing ? 'Checking…' : 'Test connection'}
         </button>
+        <button className="test-connection" onClick={() => void handleCopyLogs()} disabled={copyingLogs}>
+          {copyingLogs ? 'Copying…' : <><Copy size={14}/> Copy logs</>}
+        </button>
+        <button className="test-connection" onClick={() => { clearDebugLogs(); onToast('Logs cleared') }}>
+          Clear logs
+        </button>
+        <p className="key-note"><Sparkles size={15}/><span>If Highlight ads reloads the app, come back here and Copy logs so we can see the last line before the refresh.</span></p>
       </div>
       <button className="save-settings" onClick={onSave}>Save settings</button>
       <div className="settings-update">

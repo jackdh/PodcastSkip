@@ -70,14 +70,70 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary)
 }
 
-export async function decodeEpisodeAudio(blob: Blob): Promise<Float32Array> {
-  const context = new AudioContext()
+export async function readAudioDuration(blob: Blob): Promise<number> {
+  const url = URL.createObjectURL(blob)
   try {
+    const duration = await new Promise<number>((resolve, reject) => {
+      const audio = document.createElement('audio')
+      audio.preload = 'metadata'
+      audio.onloadedmetadata = () => {
+        const value = audio.duration
+        audio.src = ''
+        if (Number.isFinite(value) && value > 0) resolve(value)
+        else reject(new Error('Could not read audio duration.'))
+      }
+      audio.onerror = () => reject(new Error('Could not read audio duration.'))
+      audio.src = url
+    })
+    return duration
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+export function audioFormatFromBlob(blob: Blob): 'mp3' | 'm4a' | 'wav' | 'ogg' | 'aac' | 'webm' {
+  const type = blob.type.toLowerCase()
+  if (type.includes('wav')) return 'wav'
+  if (type.includes('ogg')) return 'ogg'
+  if (type.includes('webm')) return 'webm'
+  if (type.includes('mp4') || type.includes('m4a') || type.includes('aac')) return 'm4a'
+  return 'mp3'
+}
+
+export function sliceBlobByTime(
+  blob: Blob,
+  durationSeconds: number,
+  startSeconds: number,
+  endSeconds: number,
+  padSeconds = 0.35,
+) {
+  const paddedStart = Math.max(0, startSeconds - padSeconds)
+  const paddedEnd = Math.min(durationSeconds, endSeconds + padSeconds)
+  const startByte = Math.floor((paddedStart / durationSeconds) * blob.size)
+  const endByte = Math.max(startByte + 1024, Math.ceil((paddedEnd / durationSeconds) * blob.size))
+  return {
+    blob: blob.slice(startByte, Math.min(blob.size, endByte)),
+    offsetSeconds: paddedStart,
+    durationSeconds: Math.max(0.5, paddedEnd - paddedStart),
+  }
+}
+
+export function createAudioContext(): AudioContext {
+  const Ctor = window.AudioContext
+    || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+  if (!Ctor) throw new Error('This browser cannot decode audio in the page.')
+  return new Ctor()
+}
+
+export async function decodeEpisodeAudio(blob: Blob, context?: AudioContext): Promise<Float32Array> {
+  const local = context ?? createAudioContext()
+  try {
+    if (local.state === 'suspended') await local.resume().catch(() => undefined)
     const raw = await blob.arrayBuffer()
-    const decoded = await context.decodeAudioData(raw.slice(0))
+    const decoded = await local.decodeAudioData(raw.slice(0))
     return downsampleToMono16k(decoded)
   } finally {
-    await context.close().catch(() => undefined)
+    if (!context) await local.close().catch(() => undefined)
   }
 }
 

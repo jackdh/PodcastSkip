@@ -1,5 +1,6 @@
-import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount } from './audioTranscript'
+import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, readAudioDuration, sliceBlobByTime, audioFormatFromBlob, createAudioContext } from './audioTranscript'
 import { coerceMinuteClocks, refineAdSegments } from './adRefine'
+import { appLog, memorySnapshot } from './appLog'
 
 export type AdSegment = {
   start: number
@@ -283,15 +284,16 @@ function cuesFromTimedParts(
 
 async function transcribeChunk(
   apiKey: string,
-  base64Wav: string,
+  base64Audio: string,
   offsetSeconds: number,
   chunkDurationSeconds: number,
   sttModel: string,
+  format = 'wav',
 ): Promise<TranscriptCue[]> {
   // Send the downloaded audio bytes. Never a publisher transcript URL or remote
   // file URL — official transcripts omit ads, which would make skip-ads trivial
   // to defeat.
-  const audio = { data: base64Wav, format: 'wav' }
+  const audio = { data: base64Audio, format }
   const timedBody = {
     model: sttModel,
     language: 'en',
@@ -389,15 +391,7 @@ export async function transcribeEpisodeAudio(options: {
   maxMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
-  options.onProgress?.('Decoding downloaded audio…')
-  const samples = await decodeEpisodeAudio(options.audioBlob)
-  return transcribeEpisodeSamples({
-    apiKey: options.apiKey,
-    samples,
-    sttModel: options.sttModel,
-    maxMinutes: options.maxMinutes,
-    onProgress: options.onProgress,
-  })
+  return transcribeEpisodeBlob(options)
 }
 
 export async function detectAdSegmentsFromTranscript(options: {
@@ -416,6 +410,12 @@ export async function detectAdSegmentsFromTranscript(options: {
 
   const windows = splitCuesForPrompt(options.cues)
   const collected: AdSegment[] = []
+  appLog('info', 'ad analysis start', {
+    model: options.model,
+    cues: options.cues.length,
+    windows: windows.length,
+    duration: Number(options.durationSeconds.toFixed(1)),
+  })
   for (let index = 0; index < windows.length; index += 1) {
     if (windows.length > 1) options.onProgress?.(`Finding ad breaks ${index + 1}/${windows.length}…`)
     const windowCues = windows[index]
@@ -474,7 +474,9 @@ ${transcript}`
     collected.push(...normalizeSegments(extractJsonObject(content), options.durationSeconds, windowCues))
   }
 
-  return refineAdSegments(mergeOverlappingSegments(collected.sort((a, b) => a.start - b.start)), options.cues)
+  const merged = refineAdSegments(mergeOverlappingSegments(collected.sort((a, b) => a.start - b.start)), options.cues)
+  appLog('info', 'ad analysis done', { raw: collected.length, refined: merged.length })
+  return merged
 }
 
 function splitCuesForPrompt(cues: TranscriptCue[], maxChars = 80_000): TranscriptCue[][] {
@@ -545,19 +547,116 @@ export async function detectAdSegmentsFromAudio(options: {
   maxMinutes?: number
   onProgress?: (message: string) => void
 }): Promise<{ segments: AdSegment[]; cues: TranscriptCue[]; durationSeconds: number }> {
-  options.onProgress?.('Decoding downloaded audio…')
-  const samples = await decodeEpisodeAudio(options.audioBlob)
-  return detectAdSegmentsFromSamples({
+  const { cues, durationSeconds } = await transcribeEpisodeBlob({
+    apiKey: options.apiKey,
+    audioBlob: options.audioBlob,
+    sttModel: options.sttModel,
+    maxMinutes: options.maxMinutes,
+    onProgress: options.onProgress,
+  })
+  options.onProgress?.('Finding ad breaks in the spoken transcript…')
+  const segments = await detectAdSegmentsFromTranscript({
     apiKey: options.apiKey,
     model: options.model,
     title: options.title,
     show: options.show,
     description: options.description,
-    samples,
-    sttModel: options.sttModel,
-    maxMinutes: options.maxMinutes,
+    durationSeconds,
+    cues,
     onProgress: options.onProgress,
   })
+  return { segments, cues, durationSeconds }
+}
+
+export async function transcribeEpisodeBlob(options: {
+  apiKey: string
+  audioBlob: Blob
+  sttModel?: string
+  maxMinutes?: number
+  onProgress?: (message: string) => void
+}): Promise<{ cues: TranscriptCue[]; durationSeconds: number }> {
+  const trimmed = options.apiKey.trim()
+  if (!trimmed) throw new Error('Add an OpenRouter API key in Settings first.')
+
+  const blob = options.audioBlob
+  appLog('info', 'transcribe blob', {
+    bytes: blob.size,
+    type: blob.type || 'unknown',
+    maxMinutes: options.maxMinutes ?? 0,
+    stt: options.sttModel ?? DEFAULT_STT_MODEL,
+    memory: memorySnapshot(),
+  })
+  options.onProgress?.('Reading downloaded audio…')
+  const fullDuration = await readAudioDuration(blob)
+  const startSeconds = 0
+  const windowSeconds = options.maxMinutes && options.maxMinutes > 0
+    ? Math.min(fullDuration, options.maxMinutes * 60)
+    : fullDuration
+  if (windowSeconds < 15) throw new Error('This episode is too short to analyse for ads.')
+
+  const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
+  const chunkSeconds = sttChunkSeconds(sttModel)
+  const totalChunks = Math.ceil(windowSeconds / chunkSeconds)
+  const format = audioFormatFromBlob(blob)
+  const cues: TranscriptCue[] = []
+  let context: AudioContext | undefined
+  try {
+    context = createAudioContext()
+  } catch {
+    context = undefined
+  }
+
+  appLog('info', 'audio duration ready', {
+    fullDuration: Number(fullDuration.toFixed(1)),
+    windowSeconds: Number(windowSeconds.toFixed(1)),
+    chunks: totalChunks,
+    chunkSeconds,
+    format,
+    memory: memorySnapshot(),
+  })
+
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = startSeconds + index * chunkSeconds
+      const end = Math.min(windowSeconds, start + chunkSeconds)
+      const slice = sliceBlobByTime(blob, fullDuration, start, end)
+      options.onProgress?.(`Transcribing downloaded audio ${index + 1}/${totalChunks}…`)
+      appLog('info', `chunk ${index + 1}/${totalChunks}`, {
+        start: Number(start.toFixed(1)),
+        end: Number(end.toFixed(1)),
+        sliceBytes: slice.blob.size,
+        memory: memorySnapshot(),
+      })
+
+      let chunkCues: TranscriptCue[] = []
+      try {
+        if (!context) throw new Error('AudioContext unavailable')
+        const samples = await decodeEpisodeAudio(slice.blob, context)
+        const wav = arrayBufferToBase64(encodeWav(samples, 16000))
+        chunkCues = await transcribeChunk(trimmed, wav, slice.offsetSeconds, slice.durationSeconds, sttModel, 'wav')
+      } catch (error) {
+        appLog('warn', `chunk ${index + 1} decode failed, sending compressed audio`, {
+          message: error instanceof Error ? error.message : String(error),
+        })
+        const compressed = arrayBufferToBase64(await slice.blob.arrayBuffer())
+        chunkCues = await transcribeChunk(
+          trimmed,
+          compressed,
+          slice.offsetSeconds,
+          slice.durationSeconds,
+          sttModel,
+          format,
+        )
+      }
+      cues.push(...chunkCues)
+    }
+  } finally {
+    if (context) await context.close().catch(() => undefined)
+  }
+
+  if (!cues.length) throw new Error('Transcription returned no speech to analyse.')
+  appLog('info', 'transcription complete', { cues: cues.length, memory: memorySnapshot() })
+  return { cues, durationSeconds: startSeconds + windowSeconds }
 }
 
 export function formatCredits(value: number | null): string {

@@ -27,7 +27,7 @@
 .download.busy{color:#4d6b62;background:#eef3f0}
 .episode-row.playing{background:#f3f8f5}
 .episode-row.playing .episode-info>span{color:#1f6b5c}
-.test-connection{margin-top:12px;width:100%;height:38px;background:#f4f8f5;color:#1f4f45;border:1px solid #c9ddd4;border-radius:6px;font-size:12px;font-weight:700}
+.test-connection{margin-top:12px;width:100%;height:38px;background:#f4f8f5;color:#1f4f45;border:1px solid #c9ddd4;border-radius:6px;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:8px}
 .test-connection:disabled{opacity:.65;cursor:wait}
 .test-connection:not(:disabled):hover{background:#e8f3ee}
 .saved-stat{font:600 15px Fraunces,serif;color:#2f5f55}

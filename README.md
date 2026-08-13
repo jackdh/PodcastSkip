@@ -11,6 +11,7 @@ ads, which would make skip-ads trivial to defeat.
 - Installable PWA for iOS and Android, with a service worker for app-shell offline use.
 - Downloaded episodes play from Cache Storage when offline; search and live timelines still need a network.
 - Settings includes a Force update control plus the build version and update date (injected at deploy time).
+- Settings → Copy logs stores recent Highlight ads / crash lines in localStorage so a phone refresh can still be diagnosed.
 - Responsive desktop and mobile podcast listening interface.
 - Live Apple Podcasts catalog search, show episodes, and browser audio playback.
 - Same-origin Pages Function audio streaming and persistent Cache Storage downloads for offline listening.
