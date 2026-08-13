@@ -22,10 +22,17 @@ export type AdSegment = {
   label?: string
 }
 
+export type TranscriptWord = {
+  start: number
+  end: number
+  text: string
+}
+
 export type TranscriptCue = {
   start: number
   end: number
   text: string
+  words?: TranscriptWord[]
 }
 
 export type KeyStatus = {
@@ -216,6 +223,34 @@ function cuesFromTimedParts(
     .filter((cue): cue is TranscriptCue => Boolean(cue))
 }
 
+function wordsFromTimedParts(
+  parts: TranscriptionResponse['words'] | undefined,
+  offsetSeconds: number,
+): TranscriptWord[] {
+  if (!parts?.length) return []
+  return parts
+    .map((part) => {
+      const text = (part.word ?? part.text ?? '').trim()
+      const start = cueTime(part.start)
+      const end = cueTime(part.end)
+      if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+      return {
+        start: offsetSeconds + start,
+        end: offsetSeconds + end,
+        text,
+      } satisfies TranscriptWord
+    })
+    .filter((word): word is TranscriptWord => Boolean(word))
+}
+
+export function attachWordsToCues(cues: TranscriptCue[], words: TranscriptWord[]): TranscriptCue[] {
+  if (!cues.length || !words.length) return cues
+  return cues.map((cue) => {
+    const owned = words.filter((word) => word.start < cue.end - 0.01 && word.end > cue.start + 0.01)
+    return owned.length ? { ...cue, words: owned } : cue
+  })
+}
+
 async function transcribeChunk(
   apiKey: string,
   base64Audio: string,
@@ -229,6 +264,13 @@ async function transcribeChunk(
   // file URL — official transcripts omit ads, which would make skip-ads trivial
   // to defeat.
   const audio = { data: base64Audio, format }
+  const timedWordBody = {
+    model: sttModel,
+    language: 'en',
+    response_format: 'verbose_json',
+    timestamp_granularities: ['word', 'segment'],
+    input_audio: audio,
+  }
   const timedBody = {
     model: sttModel,
     language: 'en',
@@ -242,7 +284,8 @@ async function transcribeChunk(
   }
 
   throwIfAborted(signal)
-  let response = await openRouterPost(apiKey, 'audio/transcriptions', timedBody, signal)
+  let response = await openRouterPost(apiKey, 'audio/transcriptions', timedWordBody, signal)
+  if (response.status === 400) response = await openRouterPost(apiKey, 'audio/transcriptions', timedBody, signal)
   if (response.status === 400) response = await openRouterPost(apiKey, 'audio/transcriptions', plainBody, signal)
 
   if (response.status === 401) throw new Error('API key is invalid or revoked.')
@@ -255,14 +298,20 @@ async function transcribeChunk(
   const payload = await response.json() as TranscriptionResponse
   if (payload.error?.message) throw new Error(payload.error.message)
 
-  const timed = cuesFromTimedParts(payload.segments, offsetSeconds)
+  const words = wordsFromTimedParts(payload.words, offsetSeconds)
+  const timed = attachWordsToCues(cuesFromTimedParts(payload.segments, offsetSeconds), words)
   if (timed.length) return timed
-  const sentenceCues = cuesFromTimedParts(payload.sentences, offsetSeconds)
+  const sentenceCues = attachWordsToCues(cuesFromTimedParts(payload.sentences, offsetSeconds), words)
   if (sentenceCues.length) return sentenceCues
 
   const text = (payload.text ?? '').trim()
   if (!text) return []
-  return [{ start: offsetSeconds, end: offsetSeconds + Math.max(1, chunkDurationSeconds), text }]
+  const fallback: TranscriptCue = {
+    start: offsetSeconds,
+    end: offsetSeconds + Math.max(1, chunkDurationSeconds),
+    text,
+  }
+  return attachWordsToCues([fallback], words)
 }
 
 export async function transcribeEpisodeSamples(options: {

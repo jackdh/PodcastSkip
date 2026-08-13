@@ -5,11 +5,11 @@ import {
 } from 'lucide-react'
 import type { Episode } from './podcastApi'
 import type { AdSegment, TranscriptCue } from './openRouter'
+import { playbackAdSegments } from './adRefine'
 import {
   activeCueIndex,
   analysisWindowEnd,
   buildScrubberSegments,
-  cueOverlapsAd,
   formatRemaining,
   formatTime,
   isPlayheadPastTranscript,
@@ -17,6 +17,7 @@ import {
   nextSleepMinutes,
   segmentPlayedFraction,
   transcriptCoverageEnd,
+  wordOverlapsAd,
   wordsFromCue,
 } from './playerModel'
 
@@ -225,28 +226,34 @@ function TranscriptFollow({
       onTouchStart={() => { userScrollAt.current = Date.now() }}
     >
       {cues.map((cue, index) => {
-        const ad = cueOverlapsAd(cue, adSegments)
         const current = index === followedIndex
         const spoken = !pastCoverage && followedIndex >= 0 && index <= followedIndex
         const words = wordsFromCue(cue)
+        const adWords = new Set(words.flatMap((word, wordIndex) => (
+          wordOverlapsAd(word, adSegments) ? [wordIndex] : []
+        )))
+        const lineAd = words.length > 0 && adWords.size === words.length
         return (
           <p
             key={`${cue.start}-${cue.end}-${index}`}
             ref={current ? currentRef : undefined}
-            className={`now-line ${ad ? 'ad' : ''} ${current ? 'current' : ''} ${spoken && !current ? 'spoken' : ''}`}
+            className={`now-line ${lineAd ? 'ad' : ''} ${current ? 'current' : ''} ${spoken && !current ? 'spoken' : ''}`}
           >
-            {ad && <span className="ad-inline">AD </span>}
             {words.map((word, wordIndex) => {
               const active = current && currentTime >= word.start && currentTime < word.end
+              const ad = adWords.has(wordIndex)
+              const adStarts = ad && !adWords.has(wordIndex - 1)
               return (
-                <button
-                  type="button"
-                  key={`${word.start}-${wordIndex}`}
-                  className={`transcript-word ${active ? 'current' : ''}`}
-                  onClick={() => onSeek(word.start, { allowAds: true })}
-                >
-                  {word.text}
-                </button>
+                <span key={`${word.start}-${wordIndex}`}>
+                  {adStarts ? <span className="ad-inline">AD </span> : null}
+                  <button
+                    type="button"
+                    className={`transcript-word ${ad ? 'ad' : ''} ${active ? 'current' : ''}`}
+                    onClick={() => onSeek(word.start, { allowAds: true })}
+                  >
+                    {word.text}
+                  </button>
+                </span>
               )
             })}
           </p>
@@ -436,6 +443,7 @@ export function PlayerBar({
   const scanRest = needsFullEpisodeScan(cues, analyseMinutes, duration)
   const coverageEnd = transcriptCoverageEnd(cues)
   const transcriptOpen = showTranscript && cues.length > 0
+  const playbackAds = playbackAdSegments(adSegments, cues)
 
   if (!expanded) {
     return (
@@ -446,7 +454,7 @@ export function PlayerBar({
             duration={duration}
             fallbackLabel={episode.duration}
             title={episode.title}
-            adSegments={adSegments}
+            adSegments={playbackAds}
             onSeek={onSeek}
             variant="slim"
           />
@@ -525,7 +533,7 @@ export function PlayerBar({
       {transcriptOpen ? (
         <TranscriptFollow
           cues={cues}
-          adSegments={adSegments}
+          adSegments={playbackAds}
           currentTime={currentTime}
           pastCoverage={pastCoverage}
           onSeek={onSeek}
@@ -555,7 +563,7 @@ export function PlayerBar({
           duration={duration}
           fallbackLabel={episode.duration}
           title={episode.title}
-          adSegments={adSegments}
+          adSegments={playbackAds}
           onSeek={onSeek}
         />
 
