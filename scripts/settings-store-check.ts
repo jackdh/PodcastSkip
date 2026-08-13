@@ -1,4 +1,4 @@
-import { readStoredApiKey, writeStoredSettings } from '../src/settingsStore.ts'
+import { clearStoredApiKey, readStoredApiKey, writeStoredSettings } from '../src/settingsStore.ts'
 
 const store: Record<string, string> = {}
 globalThis.localStorage = {
@@ -16,4 +16,10 @@ if (readStoredApiKey() !== 'sk-or-v1-keep-me') {
 if (JSON.parse(store['podflow-settings']).model !== 'deepseek/deepseek-v4-flash') {
   throw new Error('other settings should still update')
 }
+
+clearStoredApiKey()
+if (readStoredApiKey()) {
+  throw new Error(`expected Remove key to wipe storage, got ${readStoredApiKey()}`)
+}
 console.log('settingsStore: API key survives blank rebuild write OK')
+console.log('settingsStore: explicit Remove key clears the stored secret OK')
