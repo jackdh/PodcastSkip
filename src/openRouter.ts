@@ -5,6 +5,7 @@ import { mergeOverlappingSegments, normalizeSegments } from './adParse'
 import { appLog, memorySnapshot } from './appLog'
 import {
   abortError,
+  createPool,
   createTaskQueue,
   isAbortError,
   mergeCues,
@@ -71,7 +72,15 @@ export const DEFAULT_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash'
 export const DEEPSEEK_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash'
 const WHISPER_CHUNK_SECONDS = 45
 const UNTIMED_STT_CHUNK_SECONDS = 15
-const STT_CONCURRENCY = 4
+/** Whisper clips are larger WAVs; keep a smaller in-flight cap on phones. */
+const WHISPER_STT_CONCURRENCY = 8
+/**
+ * Qwen has no word clocks, so clips stay at 15s. OpenRouter still takes one
+ * clip per request — overlap more of those tiny posts so a 40-minute episode
+ * is not ~170 sequential round trips. 429/502/503 already retry with backoff.
+ */
+const QWEN_STT_CONCURRENCY = 12
+const DECODE_CONCURRENCY = 2
 const ANALYSIS_CONCURRENCY = 2
 
 const openRouterHeaders = (apiKey: string, contentType = 'application/json') => ({
@@ -151,8 +160,22 @@ export function excerptAroundSegment(
   }
 }
 
-function sttChunkSeconds(sttModel: string) {
-  return /qwen/i.test(sttModel) && /asr/i.test(sttModel) ? UNTIMED_STT_CHUNK_SECONDS : WHISPER_CHUNK_SECONDS
+export function isQwenAsr(sttModel: string) {
+  return /qwen/i.test(sttModel) && /asr/i.test(sttModel)
+}
+
+export function sttChunkSeconds(sttModel: string) {
+  return isQwenAsr(sttModel) ? UNTIMED_STT_CHUNK_SECONDS : WHISPER_CHUNK_SECONDS
+}
+
+export function sttConcurrency(sttModel: string) {
+  return isQwenAsr(sttModel) ? QWEN_STT_CONCURRENCY : WHISPER_STT_CONCURRENCY
+}
+
+function transcribeProgress(done: number, total: number, concurrency: number, skipped = 0) {
+  const atOnce = Math.min(concurrency, Math.max(1, total))
+  if (skipped) return `Transcribing ${done}/${total} remaining chunks (${skipped} already saved)…`
+  return `Transcribing downloaded audio ${done}/${total} · ${atOnce} at once…`
 }
 
 function throwIfAborted(signal?: AbortSignal) {
@@ -294,10 +317,11 @@ export async function transcribeEpisodeSamples(options: {
 
   const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
   const chunkSeconds = sttChunkSeconds(sttModel)
+  const concurrency = sttConcurrency(sttModel)
   const totalChunks = wavChunkCount(samples.length, 16000, chunkSeconds)
   const indexes = Array.from({ length: totalChunks }, (_, index) => index)
 
-  const batches = await runPool(indexes, STT_CONCURRENCY, async (index) => {
+  const batches = await runPool(indexes, concurrency, async (index) => {
     const chunk = encodeWavChunkAt(samples, index, 16000, chunkSeconds)
     if (!chunk) return [] as TranscriptCue[]
     return transcribeChunk(
@@ -310,7 +334,7 @@ export async function transcribeEpisodeSamples(options: {
       options.signal,
     )
   }, (done, total) => {
-    options.onProgress?.(`Transcribing downloaded audio ${done}/${total}…`)
+    options.onProgress?.(transcribeProgress(done, total, concurrency))
   }, options.signal)
 
   const cues = batches.flat()
@@ -576,6 +600,7 @@ export async function transcribeEpisodeBlob(options: {
 
   const sttModel = options.sttModel ?? DEFAULT_STT_MODEL
   const chunkSeconds = sttChunkSeconds(sttModel)
+  const concurrency = sttConcurrency(sttModel)
   const format = audioFormatFromBlob(blob)
   const cached = options.existingRanges ?? []
   const needed = uncoveredChunks(0, windowSeconds, chunkSeconds, cached)
@@ -587,6 +612,7 @@ export async function transcribeEpisodeBlob(options: {
     chunks: needed.length,
     skipped: skippedChunks,
     chunkSeconds,
+    concurrency,
     format,
     memory: memorySnapshot(),
   })
@@ -602,9 +628,7 @@ export async function transcribeEpisodeBlob(options: {
   const seekIndex = await indexAudioBlob(blob, fullDuration)
   appLog('info', 'audio index', { kind: seekIndex.kind, points: seekIndex.points.length })
 
-  options.onProgress?.(skippedChunks
-    ? `Transcribing ${needed.length} remaining chunks (${skippedChunks} already saved)…`
-    : `Transcribing downloaded audio 0/${needed.length}…`)
+  options.onProgress?.(transcribeProgress(0, needed.length, concurrency, skippedChunks))
 
   let context: AudioContext | undefined
   try {
@@ -612,13 +636,13 @@ export async function transcribeEpisodeBlob(options: {
   } catch {
     context = undefined
   }
-  const decodeOne = createTaskQueue()
+  const decodeOne = createPool(DECODE_CONCURRENCY)
   const mergeOne = createTaskQueue()
   let accumulated = options.existingCues ?? []
   const completed: TimeRange[] = []
 
   try {
-    await runPool(needed, STT_CONCURRENCY, async (range) => {
+    await runPool(needed, concurrency, async (range) => {
       throwIfAborted(options.signal)
       const slice = sliceBySeekIndex(blob, seekIndex, range.start, range.end)
       appLog('info', 'chunk', {
@@ -662,9 +686,7 @@ export async function transcribeEpisodeBlob(options: {
       })
       return chunkCues
     }, (done, total) => {
-      options.onProgress?.(skippedChunks
-        ? `Transcribing ${done}/${total} remaining chunks…`
-        : `Transcribing downloaded audio ${done}/${total}…`)
+      options.onProgress?.(transcribeProgress(done, total, concurrency, skippedChunks))
     }, options.signal)
 
     const cues = accumulated
