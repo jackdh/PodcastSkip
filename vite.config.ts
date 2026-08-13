@@ -20,8 +20,8 @@ export default defineConfig({
         name: 'Podflow — intelligent podcasts',
         short_name: 'Podflow',
         description: 'An intelligent, ad-aware podcast player.',
-        theme_color: '#101827',
-        background_color: '#101827',
+        theme_color: '#000000',
+        background_color: '#000000',
         display: 'standalone',
         start_url: '/',
         icons: [
