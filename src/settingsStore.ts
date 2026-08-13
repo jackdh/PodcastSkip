@@ -8,6 +8,7 @@ export type StoredSettings = {
   apiKey?: string
   analyseMinutes?: number
   playbackRate?: number
+  volume?: number
 }
 
 function readJson(key: string): StoredSettings {
@@ -43,6 +44,17 @@ export function writeStoredApiKey(key: string) {
     localStorage.setItem(API_KEY_KEY, trimmed)
   } catch {
     /* Keep going; settings blob may still hold a copy. */
+  }
+}
+
+export function clearStoredApiKey() {
+  if (typeof localStorage === 'undefined') return
+  try { localStorage.removeItem(API_KEY_KEY) } catch { /* Private mode. */ }
+  try {
+    const settings = readJson(SETTINGS_KEY)
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, apiKey: '' }))
+  } catch {
+    /* Quota or private mode. */
   }
 }
 

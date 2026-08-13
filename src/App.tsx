@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Bell, Check, ChevronDown, Copy, Download, Headphones, Home,
-  Library, LoaderCircle, MoreHorizontal, Play, Plus, Search,
-  Settings, Sparkles, WandSparkles
+  Check, ChevronDown, Copy, Download, Headphones, Home,
+  Library, LoaderCircle, Play, Plus, Search,
+  Settings, Sparkles, WandSparkles, X
 } from 'lucide-react'
 import { getShowEpisodes, playbackUrl, searchCatalog, type Episode, type PodcastShow } from './podcastApi'
 import {
@@ -16,41 +16,62 @@ import {
   QWEN_STT_MODEL,
   type AdSegment,
   type KeyStatus,
+  type TranscriptCue,
 } from './openRouter'
-import { forceAppUpdate } from './pwa'
+import { applyAppUpdate, dismissAppUpdate, forceAppUpdate, subscribeAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
-import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
+import {
+  cuesFromScans,
+  deleteTranscript,
+  loadAllScans,
+  saveScan,
+  scanRecordFromCues,
+  type CueMap,
+  type ScanMap,
+} from './transcriptStore'
 import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
-import { readStoredSettings, writeStoredSettings } from './settingsStore'
+import { clearStoredApiKey, readStoredSettings, writeStoredSettings } from './settingsStore'
 import { adSkipTarget } from './adParse'
+import { isAbortError, rangesFromCues, type TimeRange } from './scanCache'
+import { playbackErrorMessage, readNowPlaying, resumePosition, writeNowPlaying } from './playbackState'
+import { readJson, readText, writeJson, writeText } from './storage'
 
 type AdSegmentMap = Record<string, AdSegment[]>
 const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 30, 0] as const
 const DEFAULT_ANALYSE_MINUTES = 30
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
+const TABS: Tab[] = ['Home', 'Library', 'Downloads', 'Settings']
 const downloadCacheName = 'podflow-downloads-v1'
+const TAB_KEY = 'podflow-tab'
+
+function isTab(value: string): value is Tab {
+  return TABS.includes(value as Tab)
+}
 
 function Art({ artwork, label, large = false }: { artwork?: string; label: string; large?: boolean }) {
   return <div className={`art ${large ? 'large' : ''}`}>{artwork ? <img src={artwork} alt="" /> : <span>{label.slice(0, 2).toUpperCase()}</span>}</div>
 }
 
 function App() {
-  const [tab, setTab] = useState<Tab>('Home')
+  const [tab, setTab] = useState<Tab>(() => {
+    const saved = readText(TAB_KEY)
+    return isTab(saved) ? saved : 'Home'
+  })
   const [timelineEpisodes, setTimelineEpisodes] = useState<Episode[]>([])
-  const [timelineStatus, setTimelineStatus] = useState<'idle' | 'loading'>('idle')
+  const [timelineStatus, setTimelineStatus] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [focusedShowId, setFocusedShowId] = useState<number | null>(null)
   const [activeEpisode, setActiveEpisode] = useState<Episode | null>(null)
   const [playerOpen, setPlayerOpen] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [followedShows, setFollowedShows] = useState<PodcastShow[]>(() => {
-    try { return JSON.parse(localStorage.getItem('podflow-followed-shows') ?? '[]') as PodcastShow[] }
-    catch { return [] }
+    return readJson<PodcastShow[]>('podflow-followed-shows', [])
   })
   const [downloadedEpisodes, setDownloadedEpisodes] = useState<Episode[]>(() => {
-    try { return JSON.parse(localStorage.getItem('podflow-downloads') ?? '[]') as Episode[] }
-    catch { return [] }
+    return readJson<Episode[]>('podflow-downloads', [])
   })
   const [downloading, setDownloading] = useState<string[]>([])
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({})
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<{ shows: PodcastShow[]; episodes: Episode[] }>({ shows: [], episodes: [] })
   const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle')
@@ -67,24 +88,27 @@ function App() {
     const rate = Number(storedSettings.playbackRate)
     return rate > 0 ? rate : 1
   })
-  const [volume, setVolume] = useState(1)
+  const [volume, setVolume] = useState(() => {
+    const stored = Number(storedSettings.volume)
+    return stored >= 0 && stored <= 1 ? stored : 1
+  })
   const [toast, setToast] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
   const [storageUsage, setStorageUsage] = useState({ usage: 0, quota: 0 })
   const [adSegmentsByEpisode, setAdSegmentsByEpisode] = useState<AdSegmentMap>(() => {
-    try { return JSON.parse(localStorage.getItem('podflow-ad-segments') ?? '{}') as AdSegmentMap }
-    catch { return {} }
+    return readJson<AdSegmentMap>('podflow-ad-segments', {})
   })
-  const [cuesByEpisode, setCuesByEpisode] = useState<CueMap>({})
-  const [transcriptsReady, setTranscriptsReady] = useState(false)
+  const [scansByEpisode, setScansByEpisode] = useState<ScanMap>({})
   const [secondsSaved, setSecondsSaved] = useState(() => {
-    const saved = Number(localStorage.getItem('podflow-seconds-saved') ?? 0)
+    const saved = Number(readText('podflow-seconds-saved', '0'))
     return Number.isFinite(saved) ? saved : 0
   })
   const [detectingAds, setDetectingAds] = useState<string[]>([])
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null)
   const [settingsReady, setSettingsReady] = useState(false)
+  const [offline, setOffline] = useState(() => typeof navigator !== 'undefined' && navigator.onLine === false)
+  const [updateReady, setUpdateReady] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const pendingResumeRef = useRef<{ id: string; position: number } | null>(null)
   const skipAdsRef = useRef(skipAds)
@@ -93,6 +117,12 @@ function App() {
   const adSegmentsRef = useRef<AdSegment[]>([])
   const skippedAdKeysRef = useRef<Set<string>>(new Set())
   const activeEpisodeIdRef = useRef<string | null>(null)
+  const wantPlayingRef = useRef(false)
+  const scanAbortRef = useRef<Map<string, AbortController>>(new Map())
+  const downloadAbortRef = useRef<Map<string, AbortController>>(new Map())
+  const downloadingRef = useRef<Set<string>>(new Set())
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const searchWrapRef = useRef<HTMLDivElement | null>(null)
   const refreshStorageUsage = async () => {
     if (!navigator.storage?.estimate) return
     const { usage = 0, quota = 0 } = await navigator.storage.estimate()
@@ -109,33 +139,33 @@ function App() {
     setAnalyseMinutes(Number.isFinite(minutes) ? minutes : DEFAULT_ANALYSE_MINUTES)
     const rate = Number(saved.playbackRate)
     setPlaybackRate(rate > 0 ? rate : 1)
-    try {
-      const nowPlaying = JSON.parse(localStorage.getItem('podflow-now-playing') ?? 'null') as { episode?: Episode; position?: number } | null
-      if (nowPlaying?.episode?.audioUrl) {
-        pendingResumeRef.current = { id: nowPlaying.episode.id, position: nowPlaying.position ?? 0 }
-        setActiveEpisode(nowPlaying.episode)
-      }
-    } catch { /* Ignore malformed local playback state. */ }
+    const storedVolume = Number(saved.volume)
+    setVolume(storedVolume >= 0 && storedVolume <= 1 ? storedVolume : 1)
+    const nowPlaying = readNowPlaying()
+    if (nowPlaying?.episode?.audioUrl && !nowPlaying.finished) {
+      pendingResumeRef.current = { id: nowPlaying.episode.id, position: nowPlaying.position ?? 0 }
+      setActiveEpisode(nowPlaying.episode)
+    }
     setSettingsReady(true)
   }, [])
 
   useEffect(() => {
     if (!settingsReady) return
     try {
-      writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate })
+      writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate, volume })
     } catch (error) {
       appLog('error', 'settings persist failed', { message: error instanceof Error ? error.message : String(error) })
     }
-  }, [settingsReady, skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate])
+  }, [settingsReady, skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate, volume])
 
   useEffect(() => {
-    localStorage.setItem('podflow-downloads', JSON.stringify(downloadedEpisodes))
+    writeJson('podflow-downloads', downloadedEpisodes)
     void refreshStorageUsage()
   }, [downloadedEpisodes])
 
   useEffect(() => {
     try {
-      localStorage.setItem('podflow-ad-segments', JSON.stringify(adSegmentsByEpisode))
+      writeJson('podflow-ad-segments', adSegmentsByEpisode)
     } catch (error) {
       appLog('error', 'ad segments persist failed', { message: error instanceof Error ? error.message : String(error) })
     }
@@ -144,33 +174,30 @@ function App() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      let fromIdb: CueMap = {}
-      try { fromIdb = await loadAllTranscripts() } catch { /* IndexedDB may be blocked. */ }
+      let fromIdb: ScanMap = {}
+      try { fromIdb = await loadAllScans() } catch { /* IndexedDB may be blocked. */ }
       let merged = fromIdb
       try {
-        const raw = localStorage.getItem('podflow-transcript-cues')
-        if (raw) {
-          const parsed = JSON.parse(raw) as CueMap
-          merged = { ...parsed, ...fromIdb }
-          localStorage.removeItem('podflow-transcript-cues')
+        const parsed = readJson<CueMap | null>('podflow-transcript-cues', null)
+        if (parsed && Object.keys(parsed).length) {
+          merged = { ...Object.fromEntries(Object.entries(parsed).map(([id, cues]) => [id, scanRecordFromCues(cues)])), ...fromIdb }
+          try { localStorage.removeItem('podflow-transcript-cues') } catch { /* Ignore. */ }
         }
       } catch { /* Ignore a bad legacy cache. */ }
       if (!cancelled) {
-        setCuesByEpisode((current) => ({ ...merged, ...current }))
-        setTranscriptsReady(true)
+        setScansByEpisode((current) => ({ ...merged, ...current }))
       }
     })()
     return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
-    if (!transcriptsReady) return
-    void saveAllTranscripts(cuesByEpisode).catch(() => undefined)
-  }, [cuesByEpisode, transcriptsReady])
+    writeText('podflow-seconds-saved', String(secondsSaved))
+  }, [secondsSaved])
 
   useEffect(() => {
-    localStorage.setItem('podflow-seconds-saved', String(secondsSaved))
-  }, [secondsSaved])
+    writeText(TAB_KEY, tab)
+  }, [tab])
 
   useEffect(() => {
     skipAdsRef.current = skipAds
@@ -196,21 +223,23 @@ function App() {
   }, [activeEpisode?.id])
 
   useEffect(() => {
-    localStorage.setItem('podflow-followed-shows', JSON.stringify(followedShows))
+    writeJson('podflow-followed-shows', followedShows)
     let cancelled = false
     if (!followedShows.length) {
       setTimelineEpisodes([])
       setTimelineStatus('idle')
+      setFocusedShowId(null)
       return
     }
     setTimelineStatus('loading')
-    Promise.all(followedShows.map((show) => getShowEpisodes(show.id).catch(() => []))).then((episodeLists) => {
-      if (!cancelled) {
-        setTimelineEpisodes(episodeLists.flat().sort((a, b) =>
-          new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
-        ))
-        setTimelineStatus('idle')
-      }
+    Promise.all(followedShows.map((show) =>
+      getShowEpisodes(show.id).then((episodes) => ({ ok: true as const, episodes }), () => ({ ok: false as const, episodes: [] as Episode[] })),
+    )).then((results) => {
+      if (cancelled) return
+      setTimelineEpisodes(results.flatMap((result) => result.episodes).sort((a, b) =>
+        new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime(),
+      ))
+      setTimelineStatus(results.some((result) => result.ok) ? 'idle' : 'error')
     })
     return () => { cancelled = true }
   }, [followedShows])
@@ -237,6 +266,19 @@ function App() {
   }, [toast, detectingAds])
 
   useEffect(() => {
+    const onOnline = () => setOffline(false)
+    const onOffline = () => setOffline(true)
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
+    }
+  }, [])
+
+  useEffect(() => subscribeAppUpdate(setUpdateReady), [])
+
+  useEffect(() => {
     let cancelled = false
     const timer = window.setTimeout(async () => {
       if (search.trim().length < 2) {
@@ -255,6 +297,28 @@ function App() {
   }, [search])
 
   useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+      }
+      if (event.key === 'Escape' && search) setSearch('')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [search])
+
+  useEffect(() => {
+    const onPointer = (event: PointerEvent) => {
+      if (!search.trim()) return
+      if (searchWrapRef.current && !searchWrapRef.current.contains(event.target as Node)) setSearch('')
+    }
+    document.addEventListener('pointerdown', onPointer)
+    return () => document.removeEventListener('pointerdown', onPointer)
+  }, [search])
+
+  useEffect(() => {
     const previousAudio = audioRef.current
     previousAudio?.pause()
     setPlaying(false); setCurrentTime(0); setAudioDuration(0)
@@ -265,21 +329,45 @@ function App() {
     let cancelled = false
     let objectUrl: string | null = null
     let audio: HTMLAudioElement | null = null
+    let recoverAttempts = 0
+    let lastPositionState = 0
+    let usingCache = false
 
-    const attachAudio = (playableUrl: string) => {
+    const persistPosition = (time: number, finished = false) => {
+      if (!episode) return
+      writeNowPlaying(episode, time, finished)
+    }
+
+    const blobUrlFromCache = async () => {
+      if (!('caches' in window)) return null
+      try {
+        const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
+        if (!cached) return null
+        const blob = await cached.blob()
+        const copy = blob.slice(0, blob.size, blob.type || 'audio/mpeg')
+        return URL.createObjectURL(copy)
+      } catch {
+        return null
+      }
+    }
+
+    const attachAudio = (playableUrl: string, fromCache: boolean) => {
       if (cancelled) return
+      audio?.pause()
+      usingCache = fromCache
       audio = new Audio(playableUrl)
-      audio.preload = 'metadata'
+      audio.preload = fromCache ? 'auto' : 'metadata'
       audio.playbackRate = playbackRateRef.current
       audio.volume = volumeRef.current
       let lastPersisted = 0
       audio.addEventListener('loadedmetadata', () => {
         if (!audio) return
+        recoverAttempts = 0
         setAudioDuration(audio.duration)
         const resume = pendingResumeRef.current
         let position = 0
-        if (resume && resume.id === episode?.id && resume.position > 0 && resume.position < audio.duration) {
-          position = resume.position
+        if (resume && resume.id === episode?.id) {
+          position = resumePosition(resume.position, audio.duration)
         }
         pendingResumeRef.current = null
         if (skipAdsRef.current) {
@@ -289,6 +377,12 @@ function App() {
         if (position > 0) {
           audio.currentTime = position
           setCurrentTime(position)
+        }
+        if (wantPlayingRef.current) {
+          void audio.play().catch(() => {
+            wantPlayingRef.current = false
+            setPlaying(false)
+          })
         }
       })
       audio.addEventListener('timeupdate', () => {
@@ -311,40 +405,92 @@ function App() {
         setCurrentTime(time)
         if (Math.abs(time - lastPersisted) >= 5) {
           lastPersisted = time
-          localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode, position: time, updatedAt: Date.now() }))
+          persistPosition(time)
+        }
+        if ('mediaSession' in navigator && audio.duration && Math.abs(time - lastPositionState) >= 1) {
+          lastPositionState = time
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: audio.duration,
+              position: Math.min(time, audio.duration),
+              playbackRate: audio.playbackRate || 1,
+            })
+          } catch { /* Unsupported media session detail. */ }
         }
       })
       audio.addEventListener('play', () => setPlaying(true))
-      audio.addEventListener('pause', () => setPlaying(false))
-      audio.addEventListener('ended', () => setPlaying(false))
+      audio.addEventListener('pause', () => {
+        setPlaying(false)
+        persistPosition(audio?.currentTime ?? 0)
+      })
+      audio.addEventListener('ended', () => {
+        wantPlayingRef.current = false
+        setPlaying(false)
+        persistPosition(audio?.duration ?? 0, true)
+      })
       audio.addEventListener('error', () => {
         setPlaying(false)
-        setToast('This publisher does not allow playback in the browser.')
+        void recoverPlayback('error')
       })
       audioRef.current = audio
     }
 
-    const resolvePlayableUrl = async () => {
-      if ('caches' in window) {
-        try {
-          const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
-          if (cancelled) return
-          if (cached) {
-            objectUrl = URL.createObjectURL(await cached.blob())
-            attachAudio(objectUrl)
-            return
-          }
-        } catch {
-          /* Fall through to network playback. */
-        }
+    const recoverPlayback = async (reason: string) => {
+      if (cancelled || !episode) return
+      if (recoverAttempts >= 2) {
+        setToast(playbackErrorMessage(usingCache ? 'cached' : 'stream'))
+        return
       }
-      if (!cancelled) attachAudio(source)
+      recoverAttempts += 1
+      const position = audio?.currentTime || pendingResumeRef.current?.position || 0
+      if (position > 0) pendingResumeRef.current = { id: episode.id, position }
+      appLog('warn', 'audio recover', { reason, position, attempt: recoverAttempts })
+      const nextUrl = await blobUrlFromCache()
+      if (cancelled) return
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      objectUrl = nextUrl
+      if (nextUrl) attachAudio(nextUrl, true)
+      else if (reason === 'error') setToast(playbackErrorMessage(usingCache ? 'cached' : 'stream'))
+      else attachAudio(source, false)
+    }
+
+    const onForeground = () => {
+      if (document.visibilityState === 'hidden') return
+      const current = audioRef.current
+      if (!current) return
+      const broken = Boolean(current.error) || current.networkState === HTMLMediaElement.NETWORK_NO_SOURCE || current.readyState === 0
+      if (broken) void recoverPlayback('foreground')
+    }
+
+    const onPageHide = () => {
+      const time = audioRef.current?.currentTime ?? 0
+      persistPosition(time)
+    }
+
+    document.addEventListener('visibilitychange', onForeground)
+    window.addEventListener('pageshow', onForeground)
+    window.addEventListener('pagehide', onPageHide)
+
+    const resolvePlayableUrl = async () => {
+      const cachedUrl = await blobUrlFromCache()
+      if (cancelled) return
+      if (cachedUrl) {
+        objectUrl = cachedUrl
+        attachAudio(cachedUrl, true)
+        return
+      }
+      attachAudio(source, false)
     }
 
     void resolvePlayableUrl()
 
     return () => {
       cancelled = true
+      document.removeEventListener('visibilitychange', onForeground)
+      window.removeEventListener('pageshow', onForeground)
+      window.removeEventListener('pagehide', onPageHide)
+      const time = audio?.currentTime ?? 0
+      if (episode && time > 0) writeNowPlaying(episode, time)
       audio?.pause()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
@@ -358,21 +504,26 @@ function App() {
       album: activeEpisode.show,
       artwork: activeEpisode.artwork ? [{ src: activeEpisode.artwork, sizes: '600x600', type: 'image/jpeg' }] : [],
     })
-    navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'
-    if (audioDuration && Number.isFinite(audioDuration)) {
-      try { navigator.mediaSession.setPositionState({ duration: audioDuration, position: Math.min(currentTime, audioDuration) }) } catch { /* Unsupported media session detail. */ }
-    }
     const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler) => {
       try { navigator.mediaSession.setActionHandler(action, handler) } catch { /* Unsupported action. */ }
     }
-    setHandler('play', () => { void audioRef.current?.play() })
-    setHandler('pause', () => audioRef.current?.pause())
+    setHandler('play', () => { wantPlayingRef.current = true; void audioRef.current?.play() })
+    setHandler('pause', () => { wantPlayingRef.current = false; audioRef.current?.pause() })
     setHandler('seekbackward', (details) => seekTo(Math.max(0, (audioRef.current?.currentTime ?? 0) - (details.seekOffset ?? 15))))
     setHandler('seekforward', (details) => seekTo(Math.min(audioRef.current?.duration ?? 0, (audioRef.current?.currentTime ?? 0) + (details.seekOffset ?? 30))))
     setHandler('seekto', (details) => details.seekTime !== undefined && seekTo(details.seekTime))
-  }, [activeEpisode, playing, currentTime, audioDuration])
+  }, [activeEpisode])
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'
+  }, [playing])
 
   const selectEpisode = (episode: Episode) => {
+    if (activeEpisode?.id !== episode.id) {
+      pendingResumeRef.current = null
+      writeNowPlaying(episode, 0)
+    }
     setActiveEpisode(episode)
     setPlayerOpen(true)
   }
@@ -381,6 +532,7 @@ function App() {
     if (!source || !('caches' in window)) { setToast('Offline downloads are not available in this browser.'); return }
     const isDownloaded = downloadedEpisodes.some((item) => item.id === episode.id)
     if (isDownloaded) {
+      downloadAbortRef.current.get(episode.id)?.abort()
       await caches.open(downloadCacheName).then((cache) => cache.delete(source))
       setDownloadedEpisodes((items) => items.filter((item) => item.id !== episode.id))
       setAdSegmentsByEpisode((current) => {
@@ -389,7 +541,7 @@ function App() {
         delete next[episode.id]
         return next
       })
-      setCuesByEpisode((current) => {
+      setScansByEpisode((current) => {
         if (!(episode.id in current)) return current
         const next = { ...current }
         delete next[episode.id]
@@ -400,28 +552,74 @@ function App() {
       setToast('Removed downloaded episode')
       return
     }
+    if (downloadingRef.current.has(episode.id)) {
+      downloadAbortRef.current.get(episode.id)?.abort()
+      return
+    }
+    downloadingRef.current.add(episode.id)
+    const controller = new AbortController()
+    downloadAbortRef.current.set(episode.id, controller)
     setDownloading((items) => [...items, episode.id])
+    setDownloadProgress((current) => ({ ...current, [episode.id]: 0 }))
     try {
       void navigator.storage?.persist?.()
-      const response = await fetch(source)
-      if (!response.ok) throw new Error('Unable to fetch audio')
-      await caches.open(downloadCacheName).then((cache) => cache.put(source, response.clone()))
-      const downloadBytes = Number(response.headers.get('content-length') ?? 0)
+      const response = await fetch(source, { signal: controller.signal })
+      if (!response.ok) throw new Error(navigator.onLine === false ? 'You are offline. Connect to download this episode.' : 'Unable to fetch audio')
+      const total = Number(response.headers.get('content-length') ?? 0)
+      let stored: Response = response
+      if (response.body) {
+        const reader = response.body.getReader()
+        const chunks: Uint8Array[] = []
+        let received = 0
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            chunks.push(value)
+            received += value.byteLength
+            if (total) setDownloadProgress((current) => ({ ...current, [episode.id]: received / total }))
+          }
+        }
+        const blob = new Blob(chunks as BlobPart[], { type: response.headers.get('content-type') || 'audio/mpeg' })
+        stored = new Response(blob, { status: 200, headers: response.headers })
+      }
+      await caches.open(downloadCacheName).then((cache) => cache.put(source, stored.clone()))
+      const downloadBytes = Number(stored.headers.get('content-length') ?? total)
       setDownloadedEpisodes((items) => [...items.filter((item) => item.id !== episode.id), { ...episode, downloadBytes }])
       void refreshStorageUsage()
       setToast(`Downloaded ${formatBytes(downloadBytes)} for offline listening`)
-    } catch {
-      setToast('This episode could not be downloaded. Please try another publisher.')
+    } catch (error) {
+      if (isAbortError(error)) setToast('Download cancelled')
+      else setToast(navigator.onLine === false
+        ? 'You are offline. Connect to download this episode.'
+        : 'This episode could not be downloaded. Please try another publisher.')
     } finally {
+      downloadingRef.current.delete(episode.id)
+      downloadAbortRef.current.delete(episode.id)
       setDownloading((items) => items.filter((id) => id !== episode.id))
+      setDownloadProgress((current) => {
+        const next = { ...current }
+        delete next[episode.id]
+        return next
+      })
     }
   }
   const togglePlayback = async () => {
     const audio = audioRef.current
     if (!audio) { setToast('Choose an episode with playable audio first.'); return }
-    if (playing) { audio.pause(); setPlaying(false); return }
+    if (playing) {
+      wantPlayingRef.current = false
+      audio.pause()
+      setPlaying(false)
+      if (activeEpisode) writeNowPlaying(activeEpisode, audio.currentTime)
+      return
+    }
+    wantPlayingRef.current = true
     try { await audio.play(); setPlaying(true) }
-    catch { setToast('Playback was blocked. Tap play again to start listening.') }
+    catch {
+      wantPlayingRef.current = false
+      setToast('Playback was blocked. Tap play again to start listening.')
+    }
   }
   const seekTo = (time: number, options?: { allowAds?: boolean }) => {
     let next = time
@@ -443,23 +641,34 @@ function App() {
     }
     if (audioRef.current) audioRef.current.currentTime = next
     setCurrentTime(next)
-    if (activeEpisode) localStorage.setItem('podflow-now-playing', JSON.stringify({ version: 1, episode: activeEpisode, position: next, updatedAt: Date.now() }))
+    if (activeEpisode) writeNowPlaying(activeEpisode, next)
   }
   const toggleFollowShow = (show: PodcastShow) => {
     const isFollowed = followedShows.some((item) => item.id === show.id)
     setFollowedShows((shows) => isFollowed ? shows.filter((item) => item.id !== show.id) : [...shows, show])
+    if (isFollowed && focusedShowId === show.id) setFocusedShowId(null)
     setSearch('')
     setToast(isFollowed ? `Unfollowed ${show.name}` : `Following ${show.name}`)
   }
+  const openShowTimeline = (show: PodcastShow) => {
+    setFocusedShowId(show.id)
+    setTab('Library')
+  }
   const saveSettings = () => {
-    writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate })
+    writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate, volume })
     setToast('Ad skip settings saved')
+  }
+  const removeApiKey = () => {
+    setApiKey('')
+    setKeyStatus(null)
+    clearStoredApiKey()
+    setToast('API key removed from this device')
   }
   const testOpenRouterConnection = async () => {
     try {
       const status = await checkOpenRouterKey(apiKey)
       setKeyStatus(status)
-      writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate })
+      writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate, volume })
       setToast(`Connected to OpenRouter · ${formatCredits(status.limitRemaining)}`)
     } catch (error) {
       setKeyStatus(null)
@@ -467,11 +676,23 @@ function App() {
     }
   }
   const pausePlayback = () => {
+    wantPlayingRef.current = false
     audioRef.current?.pause()
     setPlaying(false)
   }
+  const cancelHighlight = (episodeId: string) => {
+    scanAbortRef.current.get(episodeId)?.abort()
+  }
+  const persistScan = (episodeId: string, cues: TranscriptCue[], ranges: TimeRange[], duration = 0) => {
+    const record = scanRecordFromCues(cues, { sttModel, duration, ranges, updatedAt: Date.now() })
+    setScansByEpisode((current) => ({ ...current, [episodeId]: record }))
+    void saveScan(episodeId, record).catch(() => undefined)
+  }
   const highlightAds = async (episode: Episode, options?: { windowMinutes?: number }) => {
-    if (detectingAds.includes(episode.id)) return
+    if (scanAbortRef.current.has(episode.id)) {
+      cancelHighlight(episode.id)
+      return
+    }
     if (!apiKey.trim()) {
       setToast('Add an OpenRouter API key in Settings first.')
       setPlayerOpen(false)
@@ -483,6 +704,8 @@ function App() {
       setToast('Download this episode first so we can analyse the audio.')
       return
     }
+    const controller = new AbortController()
+    scanAbortRef.current.set(episode.id, controller)
     setDetectingAds((items) => [...items, episode.id])
     const windowMinutes = options?.windowMinutes ?? analyseMinutes
     setToast(`Preparing audio for “${episode.title}”…`)
@@ -502,7 +725,9 @@ function App() {
       appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
       const windowLabel = windowMinutes > 0 ? `the first ${windowMinutes} minutes` : 'the full episode'
       setToast(`Analysing ${windowLabel} of “${episode.title}”…`)
-      const { segments, cues } = await detectAdSegmentsFromAudio({
+      const existing = scansByEpisode[episode.id]
+      const reuseCache = existing && (!existing.sttModel || existing.sttModel === sttModel)
+      const { segments, cues, ranges } = await detectAdSegmentsFromAudio({
         apiKey,
         model,
         sttModel,
@@ -511,11 +736,14 @@ function App() {
         description: episode.description,
         audioBlob,
         maxMinutes: windowMinutes > 0 ? windowMinutes : undefined,
+        existingCues: reuseCache ? existing.cues : undefined,
+        existingRanges: reuseCache ? existing.ranges : undefined,
+        signal: controller.signal,
         onProgress: (message) => setToast(message),
+        onPartial: (update) => persistScan(episode.id, update.cues, update.ranges),
       })
+      persistScan(episode.id, cues, ranges.length ? ranges : rangesFromCues(cues))
       setAdSegmentsByEpisode((current) => ({ ...current, [episode.id]: segments }))
-      setCuesByEpisode((current) => ({ ...current, [episode.id]: cues }))
-      void saveTranscript(episode.id, cues).catch(() => undefined)
       setActiveEpisode(episode)
       setPlayerOpen(true)
       const windowNote = windowMinutes > 0 ? ` in the first ${windowMinutes} minutes` : ''
@@ -528,6 +756,10 @@ function App() {
         memory: memorySnapshot(),
       })
     } catch (error) {
+      if (isAbortError(error)) {
+        setToast('Scan cancelled. Saved transcript is kept.')
+        return
+      }
       appLog('error', 'highlight ads failed', {
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
@@ -535,6 +767,7 @@ function App() {
       })
       setToast(error instanceof Error ? error.message : 'Ad detection failed.')
     } finally {
+      scanAbortRef.current.delete(episode.id)
       setDetectingAds((items) => items.filter((id) => id !== episode.id))
     }
   }
@@ -543,8 +776,14 @@ function App() {
   const downloadBytesById = Object.fromEntries(
     downloadedEpisodes.map((episode) => [episode.id, episode.downloadBytes ?? 0]),
   )
+  const cuesByEpisode = cuesFromScans(scansByEpisode)
   const activeAdSegments = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
   const activeCues = activeEpisode ? (cuesByEpisode[activeEpisode.id] ?? []) : []
+  const focusedShow = followedShows.find((show) => show.id === focusedShowId) ?? null
+  const timelineForView = focusedShowId
+    ? timelineEpisodes.filter((episode) => episode.showId === focusedShowId)
+    : timelineEpisodes
+  const searchShortcut = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'
 
   return <main>
     <aside className="sidebar">
@@ -556,30 +795,36 @@ function App() {
       </button>)}</nav>
       <div className="sidebar-bottom">
         <button className={tab === 'Settings' ? 'nav-active' : ''} onClick={() => setTab('Settings')}><Settings size={19}/>Settings</button>
-        <div className="profile"><div className="avatar">JT</div><div><b>Jamie Taylor</b><small>Free plan</small></div><MoreHorizontal size={18}/></div>
+        <p className="sidebar-note">Listening stays on this device.</p>
       </div>
     </aside>
 
     <section className="content">
       <header>
         <div className="mobile-brand"><Headphones size={19}/>Podflow</div>
-        <div className="search-wrap"><div className="search"><Search size={18}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search" aria-label="Search Apple Podcasts" /><kbd>⌘ K</kbd></div>
+        <div className="search-wrap" ref={searchWrapRef}><div className="search"><Search size={18}/><input ref={searchInputRef} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search Apple Podcasts" aria-label="Search Apple Podcasts" /><kbd>{searchShortcut}</kbd></div>
           {search.trim().length >= 2 && <div className="search-results">
             {searchStatus === 'loading' && <p className="search-state">Searching the podcast catalog…</p>}
-            {searchStatus === 'error' && <p className="search-state">Search is unavailable. Please try again.</p>}
+            {searchStatus === 'error' && <p className="search-state">{offline ? 'You are offline. Search needs a connection — downloaded episodes still play.' : 'Search is unavailable. Please try again.'}</p>}
             {searchStatus === 'idle' && <>{searchResults.shows.length > 0 && <><span className="result-label">SHOWS · TAP TO FOLLOW</span>{searchResults.shows.map(show => <button className="show-result" key={show.id} onClick={() => toggleFollowShow(show)}><Art artwork={show.artwork} label={show.name}/><span><b>{show.name}</b><small>{show.author}{show.genres[0] ? ` · ${show.genres[0]}` : ''}</small></span><strong className={followedShows.some(item => item.id === show.id) ? 'following-mark' : ''}>{followedShows.some(item => item.id === show.id) ? 'Following' : <Plus size={16}/>}</strong></button>)}</>}
             {searchResults.episodes.length > 0 && <><span className="result-label">EPISODES</span>{searchResults.episodes.slice(0, 4).map(episode => <button className="show-result" key={episode.id} onClick={() => { selectEpisode(episode); setSearch('') }}><Art artwork={episode.artwork} label={episode.show}/><span><b>{episode.title}</b><small>{episode.show} · {episode.duration}</small></span></button>)}</>}
             {!searchResults.shows.length && !searchResults.episodes.length && <p className="search-state">No playable podcasts found.</p>}</>}
           </div>}
         </div>
-        <button className="icon-button"><Bell size={20}/><i /></button>
-        <div className="avatar small">JT</div>
       </header>
 
-      {tab === 'Home' && <HomeView shows={followedShows} onSelect={() => setTab('Library')} onUnfollow={toggleFollowShow} />}
-      {tab === 'Library' && <LibraryView episodes={timelineEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} search="" timeline timelineStatus={timelineStatus} activeEpisodeId={activeEpisode?.id} />}
-      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved} activeEpisodeId={activeEpisode?.id}/>}
-      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} sttModel={sttModel} setSttModel={setSttModel} skipAds={skipAds} setSkipAds={setSkipAds} analyseMinutes={analyseMinutes} setAnalyseMinutes={setAnalyseMinutes} onSave={saveSettings} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
+      {updateReady && (
+        <div className="update-banner" role="status">
+          <span>A new version of Podflow is ready. Reloading keeps downloads and settings on this device.</span>
+          <button type="button" onClick={() => void applyAppUpdate()}>Reload</button>
+          <button type="button" className="later" onClick={() => dismissAppUpdate()}>Later</button>
+        </div>
+      )}
+      {offline && <p className="offline-banner">You are offline. Downloaded episodes still play; search and new episodes need a connection.</p>}
+      {tab === 'Home' && <HomeView shows={followedShows} onSelect={openShowTimeline} onUnfollow={toggleFollowShow} />}
+      {tab === 'Library' && <LibraryView episodes={timelineForView} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} downloadProgress={downloadProgress} search="" timeline timelineStatus={timelineStatus} activeEpisodeId={activeEpisode?.id} focusedShow={focusedShow} onClearFocus={() => setFocusedShowId(null)} offline={offline} />}
+      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} downloadProgress={downloadProgress} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved} activeEpisodeId={activeEpisode?.id}/>}
+      {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} sttModel={sttModel} setSttModel={setSttModel} skipAds={skipAds} setSkipAds={setSkipAds} analyseMinutes={analyseMinutes} setAnalyseMinutes={setAnalyseMinutes} onSave={saveSettings} onRemoveKey={removeApiKey} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
     </section>
 
     <PlayerBar
@@ -615,18 +860,31 @@ function App() {
 }
 
 function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSelect: (show: PodcastShow) => void; onUnfollow: (show: PodcastShow) => void }) {
-  if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Listen Now</h1><p>Search Apple Podcasts, follow a show, then play from Timeline. Add an OpenRouter key in Settings, download an episode, and Highlight ads to transcribe the audio, skip breaks, and follow the words.</p></div>
-  return <div className="page followed-home"><h1>Listen Now</h1><p className="subcopy">Shows you follow. New episodes appear in Timeline.</p><div className="show-grid">{shows.map(show => <div className="show-tile" key={show.id}><button className="show-tile-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name} large /><b>{show.name}</b><small>{show.author}</small></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
+  if (!shows.length) return <div className="page empty-following"><span className="empty-mark"><Search size={25}/></span><h1>Listen Now</h1><p>Search Apple Podcasts above, follow a show, then open Timeline to play. Add an OpenRouter key in Settings, download an episode, and Highlight ads to transcribe the audio, skip breaks, and follow the words.</p></div>
+  return <div className="page followed-home"><h1>Listen Now</h1><p className="subcopy">Shows you follow. Tap a show for its latest episodes.</p><div className="show-grid">{shows.map(show => <div className="show-tile" key={show.id}><button className="show-tile-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name} large /><b>{show.name}</b><small>{show.author}</small></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
-function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, search, downloads, timeline, timelineStatus, storageUsage, adSegmentsByEpisode, cuesByEpisode, detectingAds, onDetectAds, secondsSaved, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; search: string; downloads?: boolean; timeline?: boolean; timelineStatus?: 'idle' | 'loading'; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; secondsSaved?: number; activeEpisodeId?: string }) {
+function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, downloadProgress, search, downloads, timeline, timelineStatus, storageUsage, adSegmentsByEpisode, cuesByEpisode, detectingAds, onDetectAds, secondsSaved, activeEpisodeId, focusedShow, onClearFocus, offline }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; downloadProgress?: Record<string, number>; search: string; downloads?: boolean; timeline?: boolean; timelineStatus?: 'idle' | 'loading' | 'error'; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; secondsSaved?: number; activeEpisodeId?: string; focusedShow?: PodcastShow | null; onClearFocus?: () => void; offline?: boolean }) {
   const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? downloadBytesById?.[episode.id] ?? 0), 0)
-  const emptyText = timeline ? 'Follow podcasts using search to build your episode Timeline.' : 'Save episodes to listen without an internet connection.'
+  const emptyText = timeline
+    ? (focusedShow ? `No episodes from ${focusedShow.name} yet.` : 'Follow podcasts using search to build your episode Timeline.')
+    : 'Save episodes to listen without an internet connection.'
   const loadingTimeline = timeline && timelineStatus === 'loading' && !episodes.length
-  return <div className="page library-page"><h1>{downloads ? 'Downloads' : timeline ? 'Library' : search ? `Results for “${search}”` : 'Latest episodes'}</h1><p className="subcopy">{downloads ? 'Download, then Highlight ads to transcribe the audio. Red marks on the player bar are skipped when Skip ads is on.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>{downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}{loadingTimeline ? <div className="empty"><LoaderCircle className="spin" size={30}/><h3>Loading timeline</h3><p>Fetching the latest episodes from your shows…</p></div> : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/> : <div className="empty"><Library size={30}/><h3>{timeline ? 'Your Timeline is ready' : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}</div>
+  const timelineError = timeline && timelineStatus === 'error' && !episodes.length
+  const title = downloads ? 'Downloads' : timeline ? (focusedShow?.name ?? 'Timeline') : search ? `Results for “${search}”` : 'Latest episodes'
+  return <div className="page library-page">
+    <h1>{title}</h1>
+    {focusedShow && <button className="show-back" onClick={onClearFocus}>All shows</button>}
+    <p className="subcopy">{downloads ? 'Download, then Highlight ads to transcribe the audio. Red marks on the player bar are skipped when Skip ads is on. Tap Highlight again to cancel a scan.' : timeline ? 'The newest episodes from your followed podcasts.' : 'New releases from the shows you follow.'}</p>
+    {downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}
+    {loadingTimeline ? <div className="empty"><LoaderCircle className="spin" size={30}/><h3>Loading timeline</h3><p>Fetching the latest episodes from your shows…</p></div>
+      : timelineError ? <div className="empty"><Library size={30}/><h3>{offline ? 'You are offline' : 'Timeline could not load'}</h3><p>{offline ? 'Downloaded episodes still play from the Downloads tab. Followed shows will refresh when you are back online.' : 'Check your connection and open Timeline again.'}</p></div>
+      : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} downloadProgress={downloadProgress} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/>
+      : <div className="empty"><Library size={30}/><h3>{timeline ? (focusedShow ? focusedShow.name : 'Your Timeline is ready') : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}
+  </div>
 }
 
-function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, cuesByEpisode, detectingAds = [], onDetectAds, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; activeEpisodeId?: string }) {
+function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, downloadProgress, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, cuesByEpisode, detectingAds = [], onDetectAds, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; downloadProgress?: Record<string, number>; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; activeEpisodeId?: string }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   if (!episodes.length) return <div className="empty"><Download size={30}/><h3>Nothing downloaded yet</h3><p>Save episodes to listen without an internet connection.</p></div>
   return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => {
@@ -638,7 +896,8 @@ function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDown
     const isDownloading = downloading.includes(e.id)
     const isActive = activeEpisodeId === e.id
     const bytes = e.downloadBytes ?? downloadBytesById?.[e.id] ?? 0
-    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}</span><h3>{e.title}</h3>{e.description ? <p className="episode-blurb">{e.description}</p> : null}<p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''}`} disabled={detecting} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <LoaderCircle className="spin" size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Scanning audio…' : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button>{segments.length > 0 && <ul className="ad-range-list">{segments.map(segment => { const during = excerptAroundSegment(cues, segment.start, segment.end).during; const preview = during.map(cue => cue.text.trim()).join(' ').slice(0, 160); return <li key={`${segment.start}-${segment.end}`}><b>{formatTime(segment.start)}–{formatTime(segment.end)}</b>{segment.label ? ` · ${segment.label}` : ''}{preview ? <p>{preview}{during.map(cue => cue.text.trim()).join(' ').length > 160 ? '…' : ''}</p> : !cues.length ? <p>Transcript missing — re-scan to restore the words.</p> : null}</li> })}</ul>}</div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} disabled={isDownloading} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Downloading episode' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading…' : 'Download episode'}>{isDownloading ? <LoaderCircle className="spin" size={18}/> : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : <button className="more" onClick={event => event.stopPropagation()}><MoreHorizontal size={20}/></button>}</article>
+    const progress = downloadProgress?.[e.id]
+    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}{isDownloading && progress ? ` · ${Math.round(progress * 100)}%` : isDownloading ? ' · Downloading' : ''}</span><h3>{e.title}</h3>{e.description ? <p className="episode-blurb">{e.description}</p> : null}<p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''} ${detecting ? 'busy' : ''}`} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <X size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Cancel scan' : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button>{segments.length > 0 && <ul className="ad-range-list">{segments.map(segment => { const during = excerptAroundSegment(cues, segment.start, segment.end).during; const preview = during.map(cue => cue.text.trim()).join(' ').slice(0, 160); return <li key={`${segment.start}-${segment.end}`}><b>{formatTime(segment.start)}–{formatTime(segment.end)}</b>{segment.label ? ` · ${segment.label}` : ''}{preview ? <p>{preview}{during.map(cue => cue.text.trim()).join(' ').length > 160 ? '…' : ''}</p> : !cues.length ? <p>Transcript missing — re-scan to restore the words.</p> : null}</li> })}</ul>}</div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Cancel download' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading — tap to cancel' : 'Download episode'}>{isDownloading ? (progress ? <span className="download-pct">{Math.round(progress * 100)}</span> : <LoaderCircle className="spin" size={18}/>) : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : null}</article>
   })}</div>
 }
 
@@ -661,7 +920,7 @@ function formatBuildDate(iso: string) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttModel, skipAds, setSkipAds, analyseMinutes, setAnalyseMinutes, onSave, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; sttModel: string; setSttModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; analyseMinutes: number; setAnalyseMinutes: (v: number) => void; onSave: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
+function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttModel, skipAds, setSkipAds, analyseMinutes, setAnalyseMinutes, onSave, onRemoveKey, onToast, onTestConnection, keyStatus, secondsSaved = 0, embedded = false }: { apiKey: string; setApiKey: (v: string) => void; model: string; setModel: (v: string) => void; sttModel: string; setSttModel: (v: string) => void; skipAds: boolean; setSkipAds: (v: boolean) => void; analyseMinutes: number; setAnalyseMinutes: (v: number) => void; onSave: () => void; onRemoveKey: () => void; onToast: (message: string) => void; onTestConnection: () => Promise<void>; keyStatus: KeyStatus | null; secondsSaved?: number; embedded?: boolean }) {
   const [updating, setUpdating] = useState(false)
   const [testing, setTesting] = useState(false)
   const [copyingLogs, setCopyingLogs] = useState(false)
@@ -732,6 +991,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
           <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password" autoComplete="off"/>
         </label>
+        {apiKey.trim() ? <button className="remove-key" type="button" onClick={onRemoveKey}>Remove key from this device</button> : null}
         <div className="key-note"><Sparkles size={15}/><span>The key stays on this device across app updates. 1. Paste it once. 2. Download an episode. 3. Highlight ads transcribes that audio — we never use a publisher transcript URL. 4. Play: red marks skip, and the words follow along.</span></div>
         <label>Speech-to-text
           <select value={sttModel} onChange={e => setSttModel(e.target.value)}>
@@ -778,6 +1038,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
           {updating ? 'Updating…' : 'Force update'}
         </button>
         <p className="app-version">Version {__APP_VERSION__} · Updated {formatBuildDate(__BUILD_TIME__)}</p>
+        <p className="key-note"><Sparkles size={15}/><span>When a new build is waiting, Podflow shows a Reload banner instead of refreshing by itself. Force update still checks now and reloads.</span></p>
       </div>
     </div>
   )

@@ -544,8 +544,8 @@ export function PlayerBar({
                 ? `Past transcript · ${formatTime(coverageEnd)}`
                 : `Transcript ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
             </span>
-            <button type="button" disabled={detecting || !downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
-              {detecting ? 'Scanning…' : 'Scan rest'}
+            <button type="button" disabled={!downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
+              {detecting ? 'Cancel' : 'Scan rest'}
             </button>
           </div>
         )}
@@ -595,7 +595,7 @@ export function PlayerBar({
             <span>Skip ads {skipAds ? 'on' : 'off'}</span>
           </button>
           {downloaded ? (
-            <button className="now-dock-btn icon" disabled={detecting} onClick={() => onHighlightAds?.({ windowMinutes: 0 })} aria-label={detecting ? 'Scanning' : adSegments.length ? 'Re-scan' : 'Highlight ads'}>
+            <button className="now-dock-btn icon" onClick={() => onHighlightAds?.({ windowMinutes: 0 })} aria-label={detecting ? 'Cancel scan' : adSegments.length ? 'Re-scan' : 'Highlight ads'}>
               {detecting ? <LoaderCircle className="spin" size={20} /> : <WandSparkles size={20} />}
             </button>
           ) : (
