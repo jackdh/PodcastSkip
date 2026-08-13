@@ -11,7 +11,8 @@ Commands are defined in `package.json` and documented in `README.md`:
 - One-off real ad detect (manual, burns credits; needs `OPENROUTER_API_KEY` + ffmpeg): `npm run test:ad-detect -- --query "…" --max-minutes 3`. Writes `tmp/ad-detect-report.json` for agent inspection. Do not put this on CI. Clock-snap check (no key): `npm run test:ad-refine`.
 
 Git / deploy workflow:
-- For now, commit and push directly to `main`. Do not create feature branches or PRs unless asked.
+- Always commit and push directly to `main`. Do not use feature branches or pull requests unless the user explicitly asks for one.
+- Follow-up fixes belong on `main` too — never leave work only on a side branch after a merge.
 - Cloudflare Pages production (`https://podcastskip.pages.dev`) deploys from `main`; branch/PR previews are separate URLs and are not what we use for day-to-day review.
 
 Non-obvious caveats:

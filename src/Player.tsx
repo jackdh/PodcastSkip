@@ -34,6 +34,12 @@ function Cover({ artwork, label, size = 'card' }: { artwork?: string; label: str
   )
 }
 
+function valueFromClientX(clientX: number, el: HTMLElement, max: number) {
+  const rect = el.getBoundingClientRect()
+  if (rect.width <= 0) return 0
+  return Math.min(max, Math.max(0, ((clientX - rect.left) / rect.width) * max))
+}
+
 function SegmentedScrubber({
   currentTime,
   duration,
@@ -51,6 +57,8 @@ function SegmentedScrubber({
   onSeek: SeekHandler
   variant?: 'full' | 'slim'
 }) {
+  const railRef = useRef<HTMLDivElement>(null)
+  const dragging = useRef(false)
   const [seeking, setSeeking] = useState(false)
   const [seekTime, setSeekTime] = useState(currentTime)
   const trackMax = duration > 0 && Number.isFinite(duration) ? duration : 1
@@ -64,6 +72,22 @@ function SegmentedScrubber({
     onSeek(value)
   }
 
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !railRef.current) return
+    dragging.current = true
+    setSeeking(true)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    commit(valueFromClientX(event.clientX, railRef.current, trackMax))
+  }
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current || !railRef.current) return
+    commit(valueFromClientX(event.clientX, railRef.current, trackMax))
+  }
+  const onPointerUp = () => {
+    dragging.current = false
+    setSeeking(false)
+  }
+
   return (
     <div className={`scrubber scrubber-${variant} ${seeking ? 'seeking' : ''}`}>
       {variant === 'full' && seeking && (
@@ -72,7 +96,31 @@ function SegmentedScrubber({
           <span>{formatTime(displayTime)}</span>
         </div>
       )}
-      <div className="scrubber-rail">
+      <div
+        ref={railRef}
+        className="scrubber-rail"
+        role="slider"
+        tabIndex={0}
+        aria-label="Playback progress"
+        aria-valuemin={0}
+        aria-valuemax={trackMax}
+        aria-valuenow={Math.min(displayTime, trackMax)}
+        aria-valuetext={formatTime(displayTime)}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onKeyDown={(event) => {
+          const step = event.shiftKey ? 15 : 5
+          if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+            event.preventDefault()
+            commit(Math.min(trackMax, displayTime + step))
+          } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+            event.preventDefault()
+            commit(Math.max(0, displayTime - step))
+          }
+        }}
+      >
         <div className="scrubber-track">
           {segments.map((segment) => (
             <i
@@ -87,18 +135,6 @@ function SegmentedScrubber({
           ))}
         </div>
         {variant === 'full' && <span className="scrubber-thumb" style={{ left: `clamp(6px, ${progress * 100}%, calc(100% - 6px))` }} />}
-        <input
-          aria-label="Playback progress"
-          type="range"
-          min="0"
-          max={trackMax}
-          step="0.1"
-          value={Math.min(displayTime, trackMax)}
-          onPointerDown={() => { setSeeking(true); setSeekTime(currentTime) }}
-          onPointerUp={() => setSeeking(false)}
-          onPointerCancel={() => setSeeking(false)}
-          onChange={(event) => commit(Number(event.target.value))}
-        />
       </div>
       {variant === 'full' && (
         <div className="scrubber-meta">
@@ -106,6 +142,55 @@ function SegmentedScrubber({
           <span>{duration ? formatRemaining(displayTime, duration) : fallbackLabel}</span>
         </div>
       )}
+    </div>
+  )
+}
+
+function VolumeSlider({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const railRef = useRef<HTMLDivElement>(null)
+  const dragging = useRef(false)
+  const fill = Math.min(1, Math.max(0, value))
+
+  const commit = (clientX: number) => {
+    if (!railRef.current) return
+    onChange(valueFromClientX(clientX, railRef.current, 1))
+  }
+
+  return (
+    <div className="now-volume">
+      <Volume2 size={13} strokeWidth={1.8} aria-hidden />
+      <div
+        ref={railRef}
+        className="now-volume-rail"
+        role="slider"
+        tabIndex={0}
+        aria-label="Volume"
+        aria-valuemin={0}
+        aria-valuemax={1}
+        aria-valuenow={fill}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return
+          dragging.current = true
+          event.currentTarget.setPointerCapture(event.pointerId)
+          commit(event.clientX)
+        }}
+        onPointerMove={(event) => { if (dragging.current) commit(event.clientX) }}
+        onPointerUp={() => { dragging.current = false }}
+        onPointerCancel={() => { dragging.current = false }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+            event.preventDefault()
+            onChange(Math.min(1, fill + 0.05))
+          } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+            event.preventDefault()
+            onChange(Math.max(0, fill - 0.05))
+          }
+        }}
+      >
+        <span className="now-volume-fill" style={{ width: `${fill * 100}%` }} />
+        <span className="now-volume-thumb" style={{ left: `clamp(7px, ${fill * 100}%, calc(100% - 7px))` }} />
+      </div>
+      <Volume2 size={18} strokeWidth={1.8} aria-hidden />
     </div>
   )
 }
@@ -456,11 +541,11 @@ export function PlayerBar({
           <div className="now-coverage">
             <span>
               {pastCoverage
-                ? `Transcript ends at ${formatTime(coverageEnd)} — you are at ${formatTime(currentTime)}`
-                : `Ads and transcript only cover ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
+                ? `Past transcript · ${formatTime(coverageEnd)}`
+                : `Transcript ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
             </span>
             <button type="button" disabled={detecting || !downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
-              {detecting ? 'Scanning…' : 'Scan entire episode'}
+              {detecting ? 'Scanning…' : 'Scan rest'}
             </button>
           </div>
         )}
@@ -477,34 +562,21 @@ export function PlayerBar({
         <div className="now-transport">
           <button className="now-rate" onClick={cycleRate} aria-label="Playback speed">{playbackRate}x</button>
           <button className="now-skip" onClick={() => onSeek(Math.max(0, currentTime - 15))} aria-label="Back 15 seconds">
-            <RotateCcw size={28} strokeWidth={1.6} /><span>15</span>
+            <RotateCcw size={26} strokeWidth={1.6} /><span>15</span>
           </button>
           <button className="now-play" onClick={onPlay} aria-label={playing ? 'Pause' : 'Play'}>
-            {playing ? <Pause fill="currentColor" size={42} /> : <Play fill="currentColor" size={42} />}
+            {playing ? <Pause fill="currentColor" size={38} /> : <Play fill="currentColor" size={38} />}
           </button>
           <button className="now-skip" onClick={() => onSeek(Math.min(duration || currentTime + 30, currentTime + 30))} aria-label="Forward 30 seconds">
-            <RotateCw size={28} strokeWidth={1.6} /><span>30</span>
+            <RotateCw size={26} strokeWidth={1.6} /><span>30</span>
           </button>
           <button className={`now-sleep ${sleepMinutes ? 'on' : ''}`} onClick={cycleSleep} aria-label="Sleep timer">
-            <Moon size={22} strokeWidth={1.6} />
+            <Moon size={20} strokeWidth={1.6} />
             {sleepMinutes ? <em>{sleepMinutes}m</em> : null}
           </button>
         </div>
 
-        <div className="now-volume">
-          <Volume2 size={14} strokeWidth={1.8} />
-          <input
-            aria-label="Volume"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={volume}
-            style={{ ['--vol' as string]: `${Math.round(volume * 100)}%` }}
-            onChange={(event) => onVolumeChange(Number(event.target.value))}
-          />
-          <Volume2 size={20} strokeWidth={1.8} />
-        </div>
+        <VolumeSlider value={volume} onChange={onVolumeChange} />
 
         <div className="now-dock">
           <button
@@ -517,7 +589,7 @@ export function PlayerBar({
             <Captions size={22} />
           </button>
           <button className={`now-dock-device ${skipAds ? 'on' : ''}`} onClick={() => onSkipAdsChange(!skipAds)}>
-            <Headphones size={22} strokeWidth={1.7} />
+            <Headphones size={20} strokeWidth={1.7} />
             <span>Skip ads {skipAds ? 'on' : 'off'}</span>
           </button>
           {downloaded ? (
