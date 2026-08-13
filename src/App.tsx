@@ -21,6 +21,7 @@ import { forceAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
 import { deleteTranscript, loadAllTranscripts, saveAllTranscripts, saveTranscript, type CueMap } from './transcriptStore'
 import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
+import { readStoredSettings, writeStoredSettings } from './settingsStore'
 
 type AdSegmentMap = Record<string, AdSegment[]>
 const ANALYSE_MINUTE_OPTIONS = [3, 8, 15, 0] as const
@@ -51,12 +52,19 @@ function App() {
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<{ shows: PodcastShow[]; episodes: Episode[] }>({ shows: [], episodes: [] })
   const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle')
-  const [skipAds, setSkipAds] = useState(true)
-  const [apiKey, setApiKey] = useState('')
-  const [model, setModel] = useState(DEFAULT_ANALYSIS_MODEL)
-  const [sttModel, setSttModel] = useState(DEFAULT_STT_MODEL)
-  const [analyseMinutes, setAnalyseMinutes] = useState(8)
-  const [playbackRate, setPlaybackRate] = useState(1)
+  const [storedSettings] = useState(readStoredSettings)
+  const [skipAds, setSkipAds] = useState(storedSettings.skipAds ?? true)
+  const [apiKey, setApiKey] = useState(storedSettings.apiKey ?? '')
+  const [model, setModel] = useState(storedSettings.model ?? DEFAULT_ANALYSIS_MODEL)
+  const [sttModel, setSttModel] = useState(storedSettings.sttModel ?? DEFAULT_STT_MODEL)
+  const [analyseMinutes, setAnalyseMinutes] = useState(() => {
+    const minutes = Number(storedSettings.analyseMinutes)
+    return Number.isFinite(minutes) ? minutes : 8
+  })
+  const [playbackRate, setPlaybackRate] = useState(() => {
+    const rate = Number(storedSettings.playbackRate)
+    return rate > 0 ? rate : 1
+  })
   const [toast, setToast] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
@@ -88,22 +96,15 @@ function App() {
   }
 
   useEffect(() => {
-    const saved = localStorage.getItem('podflow-settings')
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved)
-        setSkipAds(parsed.skipAds ?? true)
-        setModel(parsed.model ?? DEFAULT_ANALYSIS_MODEL)
-        setSttModel(parsed.sttModel ?? DEFAULT_STT_MODEL)
-        setApiKey(parsed.apiKey ?? '')
-        const minutes = Number(parsed.analyseMinutes)
-        setAnalyseMinutes(Number.isFinite(minutes) ? minutes : 8)
-        const rate = Number(parsed.playbackRate)
-        setPlaybackRate(rate > 0 ? rate : 1)
-      } catch (error) {
-        appLog('warn', 'settings parse failed', { message: error instanceof Error ? error.message : String(error) })
-      }
-    }
+    const saved = readStoredSettings()
+    setSkipAds(saved.skipAds ?? true)
+    setModel(saved.model ?? DEFAULT_ANALYSIS_MODEL)
+    setSttModel(saved.sttModel ?? DEFAULT_STT_MODEL)
+    setApiKey(saved.apiKey ?? '')
+    const minutes = Number(saved.analyseMinutes)
+    setAnalyseMinutes(Number.isFinite(minutes) ? minutes : 8)
+    const rate = Number(saved.playbackRate)
+    setPlaybackRate(rate > 0 ? rate : 1)
     try {
       const nowPlaying = JSON.parse(localStorage.getItem('podflow-now-playing') ?? 'null') as { episode?: Episode; position?: number } | null
       if (nowPlaying?.episode?.audioUrl) {
@@ -117,7 +118,7 @@ function App() {
   useEffect(() => {
     if (!settingsReady) return
     try {
-      localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
+      writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate })
     } catch (error) {
       appLog('error', 'settings persist failed', { message: error instanceof Error ? error.message : String(error) })
     }
@@ -441,14 +442,14 @@ function App() {
     setToast(isFollowed ? `Unfollowed ${show.name}` : `Following ${show.name}`)
   }
   const saveSettings = () => {
-    localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
+    writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate })
     setToast('Ad skip settings saved')
   }
   const testOpenRouterConnection = async () => {
     try {
       const status = await checkOpenRouterKey(apiKey)
       setKeyStatus(status)
-      localStorage.setItem('podflow-settings', JSON.stringify({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate }))
+      writeStoredSettings({ skipAds, model, sttModel, apiKey, analyseMinutes, playbackRate })
       setToast(`Connected to OpenRouter · ${formatCredits(status.limitRemaining)}`)
     } catch (error) {
       setKeyStatus(null)
@@ -709,8 +710,9 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
         </div>
         <hr/>
         <label>OpenRouter API key <a href="https://openrouter.ai/keys" target="_blank">Get an API key ↗</a>
-          <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password"/>
+          <input value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-or-v1-••••••••••••••••" type="password" autoComplete="off"/>
         </label>
+        <div className="key-note"><Sparkles size={15}/><span>The key stays on this device across app updates. It is never sent anywhere except OpenRouter when you Highlight ads or Test connection.</span></div>
         <div className="key-note"><Sparkles size={15}/><span>1. Paste your key. 2. Download an episode. 3. Highlight ads transcribes that audio — we never use a publisher transcript URL, because those leave ads out. 4. Play: red marks skip, and the words follow along.</span></div>
         <label>Speech-to-text
           <select value={sttModel} onChange={e => setSttModel(e.target.value)}>

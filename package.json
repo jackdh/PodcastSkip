@@ -11,7 +11,8 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "test:ad-detect": "tsx scripts/ad-detect-once.ts",
-    "test:ad-refine": "tsx scripts/ad-refine-check.ts"
+    "test:ad-refine": "tsx scripts/ad-refine-check.ts",
+    "test:settings-store": "tsx scripts/settings-store-check.ts"
   },
   "dependencies": {
     "lucide-react": "^1.27.0",
