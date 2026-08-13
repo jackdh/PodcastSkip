@@ -46,12 +46,12 @@ API-key storage stays client-local. Settings can verify the key against
 OpenRouter (`GET /api/v1/key`). Highlighting ads on a download:
 
 1. Sends the cached episode audio to OpenRouter speech-to-text (Whisper by
-   default, or Qwen3 ASR Flash) in short chunks with timed transcript
-   segments. The request body is WAV bytes from the download, not a remote
-   transcript URL. Settings can limit Downloads highlighting to the first N
-   minutes. Now playing Highlight / Re-scan transcribes the whole download so
-   mid-rolls are included. Playback past a shorter saved transcript still
-   offers a full-episode re-scan.
+   default, or Qwen3 ASR Flash) in short chunks, several requests at once,
+   with timed transcript segments. The request body is WAV bytes from the
+   download, not a remote transcript URL. Settings can limit Downloads
+   highlighting to the first N minutes. Now playing Highlight / Re-scan
+   transcribes the whole download so mid-rolls are included. Playback past a
+   shorter saved transcript still offers a full-episode re-scan.
 2. Asks your chosen analysis model (DeepSeek V4 Flash by default) to mark
    advertisement ranges from numbered transcript cues (not free-form clocks).
    transcript cues (not free-form clocks). Predicted ranges are snapped onto
