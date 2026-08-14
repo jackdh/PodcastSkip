@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   coveredFraction,
   coverageEnd,
+  createPool,
   mergeCues,
   mergeRanges,
   rangesFromCues,
@@ -96,5 +97,33 @@ describe('runPool', () => {
     }, undefined, controller.signal)
     await expect(run).rejects.toMatchObject({ name: 'AbortError' })
     expect(started).toBeLessThan(5)
+  })
+
+  it('keeps the requested number of workers busy', async () => {
+    let inFlight = 0
+    let maxInFlight = 0
+    await runPool(Array.from({ length: 16 }, (_, index) => index), 8, async () => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 15))
+      inFlight -= 1
+    })
+    expect(maxInFlight).toBe(8)
+  })
+})
+
+describe('createPool', () => {
+  it('never runs more than the limit at once', async () => {
+    const enqueue = createPool(2)
+    let inFlight = 0
+    let maxInFlight = 0
+    await Promise.all(Array.from({ length: 6 }, () => enqueue(async () => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      inFlight -= 1
+    })))
+    expect(maxInFlight).toBe(2)
+    expect(inFlight).toBe(0)
   })
 })
