@@ -4,6 +4,7 @@ import {
   activeCueIndex,
   analysisWindowEnd,
   buildScrubberSegments,
+  cueOverlapsAd,
   formatRemaining,
   formatTime,
   isPlayheadPastTranscript,
@@ -11,6 +12,7 @@ import {
   nextSleepMinutes,
   segmentPlayedFraction,
   transcriptCoverageEnd,
+  wordOverlapsAd,
   wordsFromCue,
 } from './playerModel'
 
@@ -150,6 +152,34 @@ describe('wordsFromCue', () => {
     expect(words).toHaveLength(2)
     expect(words[0]).toMatchObject({ text: 'hello', start: 10, end: 11 })
     expect(words[1]).toMatchObject({ text: 'there', start: 11, end: 12 })
+  })
+
+  it('prefers timed words from Whisper over even interpolation', () => {
+    const words = wordsFromCue({
+      start: 10,
+      end: 14,
+      text: 'hello there friend',
+      words: [
+        { text: 'hello', start: 10, end: 10.4 },
+        { text: 'there', start: 10.4, end: 11.1 },
+        { text: 'friend', start: 12.8, end: 14 },
+      ],
+    })
+    expect(words[1].end).toBe(11.1)
+    expect(words[2].start).toBe(12.8)
+  })
+})
+
+describe('wordOverlapsAd', () => {
+  it('does not treat a whole cue as an ad when only the last words overlap skip', () => {
+    const cue = { start: 10, end: 30, text: 'Anyway that is the inflation story this episode is brought to you by Huel' }
+    const ads = [{ start: 24, end: 50, label: 'Huel' }]
+    expect(cueOverlapsAd(cue, ads)).toBeTruthy()
+    const words = wordsFromCue(cue)
+    const labeled = words.filter((word) => wordOverlapsAd(word, ads))
+    expect(labeled.length).toBeGreaterThan(0)
+    expect(labeled.length).toBeLessThan(words.length)
+    expect(wordOverlapsAd(words[0], ads)).toBeUndefined()
   })
 })
 

@@ -32,6 +32,7 @@ import {
 import { appLog, copyDebugLogs, clearDebugLogs, memorySnapshot } from './appLog'
 import { clearStoredApiKey, readStoredSettings, writeStoredSettings } from './settingsStore'
 import { adSkipTarget } from './adParse'
+import { playbackAdSegments } from './adRefine'
 import { isAbortError, rangesFromCues, type TimeRange } from './scanCache'
 import { playbackErrorMessage, readNowPlaying, resumePosition, writeNowPlaying } from './playbackState'
 import { readJson, readText, writeJson, writeText } from './storage'
@@ -115,6 +116,7 @@ function App() {
   const playbackRateRef = useRef(playbackRate)
   const volumeRef = useRef(volume)
   const adSegmentsRef = useRef<AdSegment[]>([])
+  const cuesRef = useRef<TranscriptCue[]>([])
   const skippedAdKeysRef = useRef<Set<string>>(new Set())
   const activeEpisodeIdRef = useRef<string | null>(null)
   const wantPlayingRef = useRef(false)
@@ -215,7 +217,8 @@ function App() {
 
   useEffect(() => {
     adSegmentsRef.current = activeEpisode ? (adSegmentsByEpisode[activeEpisode.id] ?? []) : []
-  }, [activeEpisode, adSegmentsByEpisode])
+    cuesRef.current = activeEpisode ? (cuesFromScans(scansByEpisode)[activeEpisode.id] ?? []) : []
+  }, [activeEpisode, adSegmentsByEpisode, scansByEpisode])
 
   useEffect(() => {
     skippedAdKeysRef.current = new Set()
@@ -371,7 +374,7 @@ function App() {
         }
         pendingResumeRef.current = null
         if (skipAdsRef.current) {
-          const skipTo = adSkipTarget(position, adSegmentsRef.current)
+          const skipTo = adSkipTarget(position, playbackAdSegments(adSegmentsRef.current, cuesRef.current))
           if (skipTo != null) position = skipTo
         }
         if (position > 0) {
@@ -389,7 +392,7 @@ function App() {
         if (!audio) return
         let time = audio.currentTime
         if (skipAdsRef.current) {
-          const skipTo = adSkipTarget(time, adSegmentsRef.current)
+          const skipTo = adSkipTarget(time, playbackAdSegments(adSegmentsRef.current, cuesRef.current))
           if (skipTo != null) {
             const skipped = Math.max(0, skipTo - time)
             const skipKey = `${activeEpisodeIdRef.current}:${skipTo}`
@@ -624,9 +627,12 @@ function App() {
   const seekTo = (time: number, options?: { allowAds?: boolean }) => {
     let next = time
     if (!options?.allowAds && skipAdsRef.current && activeEpisode) {
-      const segments = adSegmentsRef.current.length
-        ? adSegmentsRef.current
-        : (adSegmentsByEpisode[activeEpisode.id] ?? [])
+      const segments = playbackAdSegments(
+        adSegmentsRef.current.length
+          ? adSegmentsRef.current
+          : (adSegmentsByEpisode[activeEpisode.id] ?? []),
+        cuesRef.current,
+      )
       const skipTo = adSkipTarget(next, segments)
       if (skipTo != null) {
         const skipped = Math.max(0, skipTo - next)

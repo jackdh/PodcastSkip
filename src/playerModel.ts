@@ -1,4 +1,4 @@
-import type { AdSegment, TranscriptCue } from './openRouter'
+import type { AdSegment, TranscriptCue, TranscriptWord } from './openRouter'
 
 export type ScrubberKind = 'content' | 'ad'
 
@@ -62,7 +62,15 @@ export function needsFullEpisodeScan(
   return transcriptCoverageEnd(cues) < duration - 15
 }
 
-export function wordsFromCue(cue: TranscriptCue) {
+export function wordsFromCue(cue: TranscriptCue): TranscriptWord[] {
+  if (cue.words?.length) {
+    return cue.words.filter((word) => (
+      word.text.trim()
+      && Number.isFinite(word.start)
+      && Number.isFinite(word.end)
+      && word.end > word.start
+    ))
+  }
   const tokens = cue.text.trim().split(/\s+/).filter(Boolean)
   if (!tokens.length) return []
   const duration = Math.max(0.05, cue.end - cue.start)
@@ -71,6 +79,10 @@ export function wordsFromCue(cue: TranscriptCue) {
     const end = cue.start + ((index + 1) / tokens.length) * duration
     return { text, start, end }
   })
+}
+
+export function wordOverlapsAd(word: TranscriptWord, ads: AdSegment[]): AdSegment | undefined {
+  return ads.find((segment) => word.start < segment.end && word.end > segment.start)
 }
 
 export function cueOverlapsAd(cue: TranscriptCue, ads: AdSegment[]): AdSegment | undefined {

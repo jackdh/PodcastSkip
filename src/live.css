@@ -436,6 +436,8 @@ input[type='range']::-moz-range-thumb {
   vertical-align: baseline;
 }
 .transcript-word.current { color: #fff }
+.transcript-word.ad { color: #c9a227 }
+.transcript-word.ad.current { color: #ffd60a }
 
 .now-artwork-stage {
   flex: 1;
