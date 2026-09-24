@@ -14,6 +14,7 @@ Git / deploy workflow:
 - Always commit and push directly to `main`. Do not use feature branches or pull requests unless the user explicitly asks for one.
 - Follow-up fixes belong on `main` too — never leave work only on a side branch after a merge.
 - Cloudflare Pages production (`https://podcastskip.pages.dev`) deploys from `main`; branch/PR previews are separate URLs and are not what we use for day-to-day review.
+- Settings shows one version, from `package.json` `"version"` via `__APP_VERSION__`. `npm install` (or `node scripts/install-version-hook.mjs`) installs a pre-commit hook that patch-bumps that version when a commit would otherwise leave it unchanged. Rely on the hook, or bump `package.json` and the lockfile in the same commit. Do not add a second version label.
 
 Non-obvious caveats:
 - `npm run lint` currently fails: the `lint` script runs `eslint .` but the repo ships no `eslint.config.js` (ESLint 10 requires flat config). This is a pre-existing repo gap, unrelated to environment setup.

@@ -1,7 +1,7 @@
 {
   "name": "podcastskip",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "test:ad-detect": "tsx scripts/ad-detect-once.ts",
     "test:ad-refine": "tsx scripts/ad-refine-check.ts",
-    "test:settings-store": "tsx scripts/settings-store-check.ts"
+    "test:settings-store": "tsx scripts/settings-store-check.ts",
+    "prepare": "node scripts/install-version-hook.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.27.0",

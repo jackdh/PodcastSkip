@@ -1,0 +1,5 @@
+#!/bin/sh
+# Patch-bump the Settings version when this commit would leave it unchanged.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+exec node scripts/bump-app-version.mjs
