@@ -18,7 +18,7 @@ import {
   type KeyStatus,
   type TranscriptCue,
 } from './openRouter'
-import { applyAppUpdate, dismissAppUpdate, forceAppUpdate, subscribeAppUpdate } from './pwa'
+import { applyAppUpdate, dismissAppUpdate, DOWNLOAD_CACHE_NAME, forceAppUpdate, subscribeAppUpdate } from './pwa'
 import { PlayerBar } from './Player'
 import {
   cuesFromScans,
@@ -43,7 +43,7 @@ const DEFAULT_ANALYSE_MINUTES = 30
 
 type Tab = 'Home' | 'Library' | 'Downloads' | 'Settings'
 const TABS: Tab[] = ['Home', 'Library', 'Downloads', 'Settings']
-const downloadCacheName = 'podflow-downloads-v1'
+const downloadCacheName = DOWNLOAD_CACHE_NAME
 const TAB_KEY = 'podflow-tab'
 
 function isTab(value: string): value is Tab {
@@ -934,7 +934,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
   const handleForceUpdate = async () => {
     if (updating) return
     setUpdating(true)
-    onToast('Checking for updates…')
+    onToast('Reloading a fresh copy…')
     try {
       await forceAppUpdate()
     } catch {
@@ -1044,7 +1044,7 @@ function SettingsPanel({ apiKey, setApiKey, model, setModel, sttModel, setSttMod
           {updating ? 'Updating…' : 'Force update'}
         </button>
         <p className="app-version">Version {__APP_VERSION__} · Updated {formatBuildDate(__BUILD_TIME__)}</p>
-        <p className="key-note"><Sparkles size={15}/><span>When a new build is waiting, Podflow shows a Reload banner instead of refreshing by itself. Force update still checks now and reloads.</span></p>
+        <p className="key-note"><Sparkles size={15}/><span>When a new build is waiting, Podflow shows a Reload banner instead of refreshing by itself. Force update clears the app cache, keeps downloaded episodes, and reloads from the network. If the date still does not change on iPhone, swipe the Home Screen app away and reopen it.</span></p>
       </div>
     </div>
   )
