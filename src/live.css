@@ -420,10 +420,9 @@ input[type='range']::-moz-range-thumb {
   color: rgba(255, 255, 255, 0.38);
   text-align: left;
 }
-.now-line.spoken { color: rgba(255, 255, 255, 0.55) }
-.now-line.current { color: #fff; font-weight: 600 }
+.now-line.current { font-weight: 600 }
 .now-line.ad { color: #c9a227 }
-.now-line.ad.current { color: #ffd60a }
+.now-line.ad.current { color: #c9a227 }
 .ad-inline { font-size: 11px; font-weight: 700; letter-spacing: 0.4px; color: #ffd60a }
 .transcript-word {
   display: inline;
@@ -435,8 +434,10 @@ input[type='range']::-moz-range-thumb {
   color: inherit;
   vertical-align: baseline;
 }
+.transcript-word.spoken,
 .transcript-word.current { color: #fff }
 .transcript-word.ad { color: #c9a227 }
+.transcript-word.ad.spoken,
 .transcript-word.ad.current { color: #ffd60a }
 
 .now-artwork-stage {
@@ -480,6 +481,7 @@ input[type='range']::-moz-range-thumb {
   background: rgba(44, 44, 46, 0.72);
   border-radius: 14px;
 }
+.now-coverage[hidden] { display: none }
 .now-coverage span {
   min-width: 0;
   font-size: 12px;
@@ -488,6 +490,12 @@ input[type='range']::-moz-range-thumb {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.now-coverage.scanning span {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  color: rgba(255, 255, 255, 0.86);
 }
 .now-coverage button {
   flex: none;

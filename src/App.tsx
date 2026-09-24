@@ -35,6 +35,7 @@ import { adSkipTarget } from './adParse'
 import { playbackAdSegments } from './adRefine'
 import { isAbortError, rangesFromCues, type TimeRange } from './scanCache'
 import { playbackErrorMessage, readNowPlaying, resumePosition, writeNowPlaying } from './playbackState'
+import { scanProgressCopy } from './scanProgress'
 import { readJson, readText, writeJson, writeText } from './storage'
 
 type AdSegmentMap = Record<string, AdSegment[]>
@@ -106,6 +107,7 @@ function App() {
     return Number.isFinite(saved) ? saved : 0
   })
   const [detectingAds, setDetectingAds] = useState<string[]>([])
+  const [scanProgressById, setScanProgressById] = useState<Record<string, string>>({})
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null)
   const [settingsReady, setSettingsReady] = useState(false)
   const [offline, setOffline] = useState(() => typeof navigator !== 'undefined' && navigator.onLine === false)
@@ -335,6 +337,11 @@ function App() {
     let recoverAttempts = 0
     let lastPositionState = 0
     let usingCache = false
+    let raf = 0
+    const stopClock = () => {
+      cancelAnimationFrame(raf)
+      raf = 0
+    }
 
     const persistPosition = (time: number, finished = false) => {
       if (!episode) return
@@ -356,13 +363,21 @@ function App() {
 
     const attachAudio = (playableUrl: string, fromCache: boolean) => {
       if (cancelled) return
-      audio?.pause()
+      stopClock()
       usingCache = fromCache
-      audio = new Audio(playableUrl)
+      const previous = audio
+      previous?.pause()
+      previous?.remove()
+      audio = document.createElement('audio')
       audio.preload = fromCache ? 'auto' : 'metadata'
+      audio.setAttribute('playsinline', '')
+      audio.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none'
+      audio.src = playableUrl
+      document.body.appendChild(audio)
       audio.playbackRate = playbackRateRef.current
       audio.volume = volumeRef.current
       let lastPersisted = 0
+      let lastUi = 0
       audio.addEventListener('loadedmetadata', () => {
         if (!audio) return
         recoverAttempts = 0
@@ -388,15 +403,15 @@ function App() {
           })
         }
       })
-      audio.addEventListener('timeupdate', () => {
+      const publishTime = (raw: number) => {
         if (!audio) return
-        let time = audio.currentTime
+        let time = raw
         if (skipAdsRef.current) {
           const skipTo = adSkipTarget(time, playbackAdSegments(adSegmentsRef.current, cuesRef.current))
           if (skipTo != null) {
             const skipped = Math.max(0, skipTo - time)
             const skipKey = `${activeEpisodeIdRef.current}:${skipTo}`
-            audio.currentTime = skipTo
+            if (Math.abs(audio.currentTime - skipTo) > 0.35) audio.currentTime = skipTo
             time = skipTo
             if (skipped > 0.5 && !skippedAdKeysRef.current.has(skipKey)) {
               skippedAdKeysRef.current.add(skipKey)
@@ -405,7 +420,8 @@ function App() {
             }
           }
         }
-        setCurrentTime(time)
+        if (!Number.isFinite(time)) return
+        setCurrentTime((current) => (Math.abs(current - time) < 0.04 ? current : time))
         if (Math.abs(time - lastPersisted) >= 5) {
           lastPersisted = time
           persistPosition(time)
@@ -420,7 +436,20 @@ function App() {
             })
           } catch { /* Unsupported media session detail. */ }
         }
+      }
+      const tick = () => {
+        raf = requestAnimationFrame(tick)
+        if (!audio || audio.paused || audio.ended) return
+        const now = performance.now()
+        if (now - lastUi < 100) return
+        lastUi = now
+        publishTime(audio.currentTime)
+      }
+      audio.addEventListener('timeupdate', () => {
+        lastUi = performance.now()
+        if (audio) publishTime(audio.currentTime)
       })
+      raf = requestAnimationFrame(tick)
       audio.addEventListener('play', () => setPlaying(true))
       audio.addEventListener('pause', () => {
         setPlaying(false)
@@ -494,7 +523,9 @@ function App() {
       window.removeEventListener('pagehide', onPageHide)
       const time = audio?.currentTime ?? 0
       if (episode && time > 0) writeNowPlaying(episode, time)
+      stopClock()
       audio?.pause()
+      audio?.remove()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   }, [activeEpisode])
@@ -714,7 +745,11 @@ function App() {
     scanAbortRef.current.set(episode.id, controller)
     setDetectingAds((items) => [...items, episode.id])
     const windowMinutes = options?.windowMinutes ?? analyseMinutes
-    setToast(`Preparing audio for “${episode.title}”…`)
+    const noteScan = (message: string) => {
+      setScanProgressById((current) => ({ ...current, [episode.id]: message }))
+    }
+    setToast('')
+    noteScan(`Preparing “${episode.title}”…`)
     appLog('info', 'highlight ads start', {
       title: episode.title,
       show: episode.show,
@@ -730,7 +765,7 @@ function App() {
       const audioBlob = await cached.blob()
       appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
       const windowLabel = windowMinutes > 0 ? `the first ${windowMinutes} minutes` : 'the full episode'
-      setToast(`Analysing ${windowLabel} of “${episode.title}”…`)
+      noteScan(`Analysing ${windowLabel}…`)
       const existing = scansByEpisode[episode.id]
       const reuseCache = existing && (!existing.sttModel || existing.sttModel === sttModel)
       const { segments, cues, ranges } = await detectAdSegmentsFromAudio({
@@ -745,7 +780,7 @@ function App() {
         existingCues: reuseCache ? existing.cues : undefined,
         existingRanges: reuseCache ? existing.ranges : undefined,
         signal: controller.signal,
-        onProgress: (message) => setToast(message),
+        onProgress: noteScan,
         onPartial: (update) => persistScan(episode.id, update.cues, update.ranges),
       })
       persistScan(episode.id, cues, ranges.length ? ranges : rangesFromCues(cues))
@@ -775,6 +810,12 @@ function App() {
     } finally {
       scanAbortRef.current.delete(episode.id)
       setDetectingAds((items) => items.filter((id) => id !== episode.id))
+      setScanProgressById((current) => {
+        if (!(episode.id in current)) return current
+        const next = { ...current }
+        delete next[episode.id]
+        return next
+      })
     }
   }
 
@@ -829,7 +870,7 @@ function App() {
       {offline && <p className="offline-banner">You are offline. Downloaded episodes still play; search and new episodes need a connection.</p>}
       {tab === 'Home' && <HomeView shows={followedShows} onSelect={openShowTimeline} onUnfollow={toggleFollowShow} />}
       {tab === 'Library' && <LibraryView episodes={timelineForView} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} downloadProgress={downloadProgress} search="" timeline timelineStatus={timelineStatus} activeEpisodeId={activeEpisode?.id} focusedShow={focusedShow} onClearFocus={() => setFocusedShowId(null)} offline={offline} />}
-      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} downloadProgress={downloadProgress} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={highlightAds} secondsSaved={secondsSaved} activeEpisodeId={activeEpisode?.id}/>}
+      {tab === 'Downloads' && <LibraryView episodes={downloadedEpisodes} onSelect={selectEpisode} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={downloadEpisode} downloading={downloading} downloadProgress={downloadProgress} search="" downloads storageUsage={storageUsage} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} scanProgressById={scanProgressById} onDetectAds={highlightAds} secondsSaved={secondsSaved} activeEpisodeId={activeEpisode?.id}/>}
       {tab === 'Settings' && <SettingsPanel embedded apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} sttModel={sttModel} setSttModel={setSttModel} skipAds={skipAds} setSkipAds={setSkipAds} analyseMinutes={analyseMinutes} setAnalyseMinutes={setAnalyseMinutes} onSave={saveSettings} onRemoveKey={removeApiKey} onToast={setToast} onTestConnection={testOpenRouterConnection} keyStatus={keyStatus} secondsSaved={secondsSaved}/>}
     </section>
 
@@ -847,6 +888,7 @@ function App() {
       skipAds={skipAds}
       onSkipAdsChange={setSkipAds}
       detecting={Boolean(activeEpisode && detectingAds.includes(activeEpisode.id))}
+      scanProgress={activeEpisode ? scanProgressById[activeEpisode.id] ?? '' : ''}
       onHighlightAds={(options) => { if (activeEpisode) void highlightAds(activeEpisode, options) }}
       onDownload={() => { if (activeEpisode) void downloadEpisode(activeEpisode) }}
       downloading={Boolean(activeEpisode && downloading.includes(activeEpisode.id))}
@@ -870,7 +912,7 @@ function HomeView({ shows, onSelect, onUnfollow }: { shows: PodcastShow[]; onSel
   return <div className="page followed-home"><h1>Listen Now</h1><p className="subcopy">Shows you follow. Tap a show for its latest episodes.</p><div className="show-grid">{shows.map(show => <div className="show-tile" key={show.id}><button className="show-tile-main" onClick={() => onSelect(show)}><Art artwork={show.artwork} label={show.name} large /><b>{show.name}</b><small>{show.author}</small></button><button className="unfollow" onClick={() => onUnfollow(show)} aria-label={`Unfollow ${show.name}`}>Following</button></div>)}</div></div>
 }
 
-function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, downloadProgress, search, downloads, timeline, timelineStatus, storageUsage, adSegmentsByEpisode, cuesByEpisode, detectingAds, onDetectAds, secondsSaved, activeEpisodeId, focusedShow, onClearFocus, offline }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; downloadProgress?: Record<string, number>; search: string; downloads?: boolean; timeline?: boolean; timelineStatus?: 'idle' | 'loading' | 'error'; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; secondsSaved?: number; activeEpisodeId?: string; focusedShow?: PodcastShow | null; onClearFocus?: () => void; offline?: boolean }) {
+function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, downloadProgress, search, downloads, timeline, timelineStatus, storageUsage, adSegmentsByEpisode, cuesByEpisode, detectingAds, scanProgressById, onDetectAds, secondsSaved, activeEpisodeId, focusedShow, onClearFocus, offline }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; downloadProgress?: Record<string, number>; search: string; downloads?: boolean; timeline?: boolean; timelineStatus?: 'idle' | 'loading' | 'error'; storageUsage?: { usage: number; quota: number }; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; scanProgressById?: Record<string, string>; onDetectAds?: (episode: Episode) => void; secondsSaved?: number; activeEpisodeId?: string; focusedShow?: PodcastShow | null; onClearFocus?: () => void; offline?: boolean }) {
   const downloadedBytes = episodes.reduce((total, episode) => total + (episode.downloadBytes ?? downloadBytesById?.[episode.id] ?? 0), 0)
   const emptyText = timeline
     ? (focusedShow ? `No episodes from ${focusedShow.name} yet.` : 'Follow podcasts using search to build your episode Timeline.')
@@ -885,12 +927,12 @@ function LibraryView({ episodes, onSelect, downloaded, downloadBytesById, onDown
     {downloads && <div className="storage-card"><div><b>{episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'} downloaded</b><span>Podflow audio: {formatBytes(downloadedBytes)}</span></div><div><b>{formatBytes(storageUsage?.usage ?? 0)} used by this app</b><span>{storageUsage?.quota ? `${formatBytes(Math.max(0, storageUsage.quota - storageUsage.usage))} available to Podflow` : 'Browser storage estimate unavailable'}</span></div><div><b>{formatMinutesSaved(secondsSaved ?? 0)} saved</b><span>Ad time skipped on this device</span></div></div>}
     {loadingTimeline ? <div className="empty"><LoaderCircle className="spin" size={30}/><h3>Loading timeline</h3><p>Fetching the latest episodes from your shows…</p></div>
       : timelineError ? <div className="empty"><Library size={30}/><h3>{offline ? 'You are offline' : 'Timeline could not load'}</h3><p>{offline ? 'Downloaded episodes still play from the Downloads tab. Followed shows will refresh when you are back online.' : 'Check your connection and open Timeline again.'}</p></div>
-      : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} downloadProgress={downloadProgress} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/>
+      : episodes.length ? <EpisodeList episodes={episodes} onSelect={onSelect} downloaded={downloaded} downloadBytesById={downloadBytesById} onDownload={onDownload} downloading={downloading} downloadProgress={downloadProgress} expandable={timeline} showAdActions={downloads} adSegmentsByEpisode={adSegmentsByEpisode} cuesByEpisode={cuesByEpisode} detectingAds={detectingAds} scanProgressById={scanProgressById} onDetectAds={onDetectAds} activeEpisodeId={activeEpisodeId}/>
       : <div className="empty"><Library size={30}/><h3>{timeline ? (focusedShow ? focusedShow.name : 'Your Timeline is ready') : 'Nothing downloaded yet'}</h3><p>{emptyText}</p></div>}
   </div>
 }
 
-function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, downloadProgress, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, cuesByEpisode, detectingAds = [], onDetectAds, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; downloadProgress?: Record<string, number>; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; onDetectAds?: (episode: Episode) => void; activeEpisodeId?: string }) {
+function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDownload, downloading, downloadProgress, compact = false, expandable = false, showAdActions = false, adSegmentsByEpisode, cuesByEpisode, detectingAds = [], scanProgressById, onDetectAds, activeEpisodeId }: { episodes: Episode[]; onSelect: (e: Episode) => void; downloaded: string[]; downloadBytesById?: Record<string, number>; onDownload: (episode: Episode) => void; downloading: string[]; downloadProgress?: Record<string, number>; compact?: boolean; expandable?: boolean; showAdActions?: boolean; adSegmentsByEpisode?: AdSegmentMap; cuesByEpisode?: CueMap; detectingAds?: string[]; scanProgressById?: Record<string, string>; onDetectAds?: (episode: Episode) => void; activeEpisodeId?: string }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   if (!episodes.length) return <div className="empty"><Download size={30}/><h3>Nothing downloaded yet</h3><p>Save episodes to listen without an internet connection.</p></div>
   return <div className={`episode-list ${compact ? 'compact' : ''}`}>{episodes.map(e => {
@@ -898,12 +940,13 @@ function EpisodeList({ episodes, onSelect, downloaded, downloadBytesById, onDown
     const segments = adSegmentsByEpisode?.[e.id] ?? []
     const cues = cuesByEpisode?.[e.id] ?? []
     const detecting = detectingAds.includes(e.id)
+    const scanCopy = detecting ? scanProgressCopy(scanProgressById?.[e.id] || 'Transcribing…') : null
     const isDownloaded = downloaded.includes(e.id)
     const isDownloading = downloading.includes(e.id)
     const isActive = activeEpisodeId === e.id
     const bytes = e.downloadBytes ?? downloadBytesById?.[e.id] ?? 0
     const progress = downloadProgress?.[e.id]
-    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}{isDownloading && progress ? ` · ${Math.round(progress * 100)}%` : isDownloading ? ' · Downloading' : ''}</span><h3>{e.title}</h3>{e.description ? <p className="episode-blurb">{e.description}</p> : null}<p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''} ${detecting ? 'busy' : ''}`} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <X size={15}/> : <WandSparkles size={15}/>}{detecting ? 'Cancel scan' : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button>{segments.length > 0 && <ul className="ad-range-list">{segments.map(segment => { const during = excerptAroundSegment(cues, segment.start, segment.end).during; const preview = during.map(cue => cue.text.trim()).join(' ').slice(0, 160); return <li key={`${segment.start}-${segment.end}`}><b>{formatTime(segment.start)}–{formatTime(segment.end)}</b>{segment.label ? ` · ${segment.label}` : ''}{preview ? <p>{preview}{during.map(cue => cue.text.trim()).join(' ').length > 160 ? '…' : ''}</p> : !cues.length ? <p>Transcript missing — re-scan to restore the words.</p> : null}</li> })}</ul>}</div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Cancel download' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading — tap to cancel' : 'Download episode'}>{isDownloading ? (progress ? <span className="download-pct">{Math.round(progress * 100)}</span> : <LoaderCircle className="spin" size={18}/>) : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : null}</article>
+    return <article className={`episode-row ${expanded ? 'expanded' : ''} ${isActive ? 'playing' : ''}`} key={e.id} onClick={() => expandable ? setExpandedId(expanded ? null : e.id) : onSelect(e)}><Art artwork={e.artwork} label={e.show}/><div className="episode-info"><span>{e.show}{isActive ? ' · Playing' : ''}{isDownloaded ? ' · Downloaded' : ''}{isDownloading && progress ? ` · ${Math.round(progress * 100)}%` : isDownloading ? ' · Downloading' : ''}</span><h3>{e.title}</h3>{e.description ? <p className="episode-blurb">{e.description}</p> : null}<p>{e.date} · {e.duration}{isDownloaded && bytes ? ` · ${formatBytes(bytes)}` : ''}{segments.length ? ` · ${segments.length} ad ${segments.length === 1 ? 'mark' : 'marks'}` : ''}</p>{expanded && <div className="episode-details"><p>{e.description || 'Episode details are not available from this publisher.'}</p><div><button className="detail-play" onClick={event => { event.stopPropagation(); onSelect(e) }}><Play size={15} fill="currentColor"/>{isActive ? 'Now playing' : 'Play episode'}</button><span>{e.author} · {e.date}</span></div></div>}{showAdActions && <div className="episode-ad-actions"><button className={`detect-ads ${segments.length ? 'done' : ''} ${detecting ? 'busy' : ''}`} aria-label={detecting ? 'Cancel scan' : segments.length ? 'Re-scan audio' : 'Highlight ads'} onClick={event => { event.stopPropagation(); onDetectAds?.(e) }}>{detecting ? <X size={15}/> : <WandSparkles size={15}/>}{scanCopy ? <span className="detect-status"><b>{scanCopy.title}</b>{scanCopy.detail ? <small>{scanCopy.detail}</small> : null}</span> : segments.length ? 'Re-scan audio' : 'Highlight ads'}</button>{segments.length > 0 && <ul className="ad-range-list">{segments.map(segment => { const during = excerptAroundSegment(cues, segment.start, segment.end).during; const preview = during.map(cue => cue.text.trim()).join(' ').slice(0, 160); return <li key={`${segment.start}-${segment.end}`}><b>{formatTime(segment.start)}–{formatTime(segment.end)}</b>{segment.label ? ` · ${segment.label}` : ''}{preview ? <p>{preview}{during.map(cue => cue.text.trim()).join(' ').length > 160 ? '…' : ''}</p> : !cues.length ? <p>Transcript missing — re-scan to restore the words.</p> : null}</li> })}</ul>}</div>}</div><button className={`download ${isDownloaded ? 'done' : ''} ${isDownloading ? 'busy' : ''}`} onClick={event => { event.stopPropagation(); onDownload(e) }} aria-label={isDownloaded ? 'Remove download' : isDownloading ? 'Cancel download' : 'Download episode'} title={isDownloaded ? 'Downloaded — tap to remove' : isDownloading ? 'Downloading — tap to cancel' : 'Download episode'}>{isDownloading ? (progress ? <span className="download-pct">{Math.round(progress * 100)}</span> : <LoaderCircle className="spin" size={18}/>) : isDownloaded ? <Check size={19} strokeWidth={2.5}/> : <Download size={19}/>}</button>{expandable ? <ChevronDown className={expanded ? 'chevron-up' : ''} size={18}/> : null}</article>
   })}</div>
 }
 

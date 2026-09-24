@@ -20,6 +20,7 @@ import {
   wordOverlapsAd,
   wordsFromCue,
 } from './playerModel'
+import { scanProgressCopy } from './scanProgress'
 
 const PLAYBACK_RATES = [1, 1.25, 1.5, 1.75, 2]
 const DISMISS_DISTANCE = 120
@@ -60,24 +61,46 @@ function SegmentedScrubber({
 }) {
   const railRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
+  const onSeekRef = useRef(onSeek)
+  onSeekRef.current = onSeek
   const [seeking, setSeeking] = useState(false)
   const [seekTime, setSeekTime] = useState(currentTime)
   const trackMax = duration > 0 && Number.isFinite(duration) ? duration : 1
-  const displayTime = seeking ? seekTime : currentTime
+  const trackMaxRef = useRef(trackMax)
+  trackMaxRef.current = trackMax
+  // Live playback wins the moment the finger is up. A stuck seeking flag
+  // used to freeze the clock at the last drag point (often 0:00) while audio
+  // and the transcript kept moving.
+  const displayTime = seeking && dragging.current ? seekTime : currentTime
   const progress = Math.min(1, Math.max(0, displayTime / trackMax))
   const segments = buildScrubberSegments(duration, adSegments)
   const tooltip = title || fallbackLabel
 
   const commit = (value: number) => {
     setSeekTime(value)
-    onSeek(value)
+    onSeekRef.current(value)
   }
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !railRef.current) return
     dragging.current = true
     setSeeking(true)
-    event.currentTarget.setPointerCapture(event.pointerId)
+    const pointerId = event.pointerId
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId || !railRef.current) return
+      commit(valueFromClientX(ev.clientX, railRef.current, trackMaxRef.current))
+    }
+    const end = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      window.removeEventListener('pointermove', move, true)
+      window.removeEventListener('pointerup', end, true)
+      window.removeEventListener('pointercancel', end, true)
+      dragging.current = false
+      setSeeking(false)
+    }
+    window.addEventListener('pointermove', move, true)
+    window.addEventListener('pointerup', end, true)
+    window.addEventListener('pointercancel', end, true)
     commit(valueFromClientX(event.clientX, railRef.current, trackMax))
   }
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -200,34 +223,39 @@ function TranscriptFollow({
   cues,
   adSegments,
   currentTime,
-  pastCoverage,
   onSeek,
 }: {
   cues: TranscriptCue[]
   adSegments: AdSegment[]
   currentTime: number
-  pastCoverage: boolean
   onSeek: SeekHandler
 }) {
   const currentRef = useRef<HTMLParagraphElement | null>(null)
   const userScrollAt = useRef(0)
-  const followedIndex = pastCoverage ? -1 : activeCueIndex(cues, currentTime)
+  const ignoreScrollUntil = useRef(0)
+  const followedIndex = activeCueIndex(cues, currentTime)
 
   useEffect(() => {
-    if (followedIndex < 0) return
+    const node = currentRef.current
+    const scroller = node?.parentElement
+    if (!node || !scroller || followedIndex < 0) return
     if (Date.now() - userScrollAt.current < 2800) return
-    currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const top = node.offsetTop - scroller.clientHeight * 0.35
+    ignoreScrollUntil.current = Date.now() + 800
+    scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
   }, [followedIndex])
 
   return (
     <div
       className="now-transcript"
-      onScroll={() => { userScrollAt.current = Date.now() }}
+      onScroll={() => {
+        if (Date.now() < ignoreScrollUntil.current) return
+        userScrollAt.current = Date.now()
+      }}
       onTouchStart={() => { userScrollAt.current = Date.now() }}
     >
       {cues.map((cue, index) => {
         const current = index === followedIndex
-        const spoken = !pastCoverage && followedIndex >= 0 && index <= followedIndex
         const words = wordsFromCue(cue)
         const adWords = new Set(words.flatMap((word, wordIndex) => (
           wordOverlapsAd(word, adSegments) ? [wordIndex] : []
@@ -237,10 +265,11 @@ function TranscriptFollow({
           <p
             key={`${cue.start}-${cue.end}-${index}`}
             ref={current ? currentRef : undefined}
-            className={`now-line ${lineAd ? 'ad' : ''} ${current ? 'current' : ''} ${spoken && !current ? 'spoken' : ''}`}
+            className={`now-line ${lineAd ? 'ad' : ''} ${current ? 'current' : ''}`}
           >
             {words.map((word, wordIndex) => {
-              const active = current && currentTime >= word.start && currentTime < word.end
+              const heard = Number.isFinite(currentTime) && currentTime >= word.start
+              const active = heard && currentTime < word.end
               const ad = adWords.has(wordIndex)
               const adStarts = ad && !adWords.has(wordIndex - 1)
               return (
@@ -248,7 +277,7 @@ function TranscriptFollow({
                   {adStarts ? <span className="ad-inline">AD </span> : null}
                   <button
                     type="button"
-                    className={`transcript-word ${ad ? 'ad' : ''} ${active ? 'current' : ''}`}
+                    className={`transcript-word ${ad ? 'ad' : ''} ${heard ? 'spoken' : ''} ${active ? 'current' : ''}`}
                     onClick={() => onSeek(word.start, { allowAds: true })}
                   >
                     {word.text}
@@ -351,6 +380,7 @@ export function PlayerBar({
   skipAds,
   onSkipAdsChange,
   detecting = false,
+  scanProgress = '',
   onHighlightAds,
   onDownload,
   downloading = false,
@@ -375,6 +405,7 @@ export function PlayerBar({
   skipAds: boolean
   onSkipAdsChange: (value: boolean) => void
   detecting?: boolean
+  scanProgress?: string
   onHighlightAds?: (options?: { windowMinutes?: number }) => void
   onDownload?: () => void
   downloading?: boolean
@@ -535,7 +566,6 @@ export function PlayerBar({
           cues={cues}
           adSegments={playbackAds}
           currentTime={currentTime}
-          pastCoverage={pastCoverage}
           onSeek={onSeek}
         />
       ) : (
@@ -545,18 +575,18 @@ export function PlayerBar({
       )}
 
       <div className="now-controls">
-        {(scanRest || pastCoverage) && (
-          <div className="now-coverage">
-            <span>
-              {pastCoverage
+        <div className={`now-coverage ${detecting ? 'scanning' : ''}`} hidden={!(scanRest || pastCoverage || detecting)}>
+          <span>
+            {detecting
+              ? (scanProgress ? scanProgressCopy(scanProgress).player : 'Transcribing…')
+              : pastCoverage
                 ? `Past transcript · ${formatTime(coverageEnd)}`
                 : `Transcript ${formatTime(0)}–${formatTime(coverageEnd || analysisWindowEnd(analyseMinutes, duration))}`}
-            </span>
-            <button type="button" disabled={!downloaded} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
-              {detecting ? 'Cancel' : 'Scan rest'}
-            </button>
-          </div>
-        )}
+          </span>
+          <button type="button" disabled={!downloaded && !detecting} onClick={() => onHighlightAds?.({ windowMinutes: 0 })}>
+            {detecting ? 'Cancel' : 'Scan rest'}
+          </button>
+        </div>
 
         <SegmentedScrubber
           currentTime={currentTime}
