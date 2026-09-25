@@ -106,9 +106,227 @@ export function sliceBySeekIndex(
   }
 }
 
-export async function indexAudioBlob(blob: Blob, duration: number): Promise<AudioSeekIndex> {
-  const bytes = new Uint8Array(await blob.arrayBuffer())
-  return buildAudioSeekIndex(bytes, blob.type, duration)
+const FRAME_WINDOW = 256 * 1024
+const XING_HEAD = 64 * 1024
+const MAX_MOOV = 8 * 1024 * 1024
+const MAX_FRAMES = 400_000
+
+function yieldToMain() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
+async function readRange(blob: Blob, start: number, end: number): Promise<Uint8Array> {
+  const from = Math.max(0, Math.min(blob.size, Math.floor(start)))
+  const to = Math.max(from, Math.min(blob.size, Math.floor(end)))
+  if (to === from) return new Uint8Array()
+  return new Uint8Array(await blob.slice(from, to).arrayBuffer())
+}
+
+/** ID3v2 size from a 10-byte header. Does not include a trailing footer. */
+function id3AudioStart(header: Uint8Array): number {
+  if (header.length < 10) return 0
+  if (header[0] !== 0x49 || header[1] !== 0x44 || header[2] !== 0x33) return 0
+  const size = ((header[6] & 0x7f) << 21) | ((header[7] & 0x7f) << 14) | ((header[8] & 0x7f) << 7) | (header[9] & 0x7f)
+  return 10 + size
+}
+
+function xingByteForFraction(audioStart: number, fileSize: number, fraction: number) {
+  return audioStart + Math.floor(fraction * Math.max(0, fileSize - audioStart))
+}
+
+function peekBoxHeader(bytes: Uint8Array, fileRemaining: number): { type: string; size: number } | null {
+  if (bytes.length < 8) return null
+  let size = readU32(bytes, 0)
+  const type = String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7])
+  if (size === 1) {
+    if (bytes.length < 16) return null
+    size = readU64(bytes, 8)
+  } else if (size === 0) {
+    size = fileRemaining
+  }
+  if (size < 8) return null
+  return { type, size }
+}
+
+function looksLikeMp4(mime: string, header: Uint8Array, fileSize: number) {
+  if (mime.includes('mp4') || mime.includes('m4a') || mime.includes('aac')) return true
+  const box = peekBoxHeader(header, fileSize)
+  return box?.type === 'ftyp' || box?.type === 'moov' || box?.type === 'mdat'
+}
+
+function finishFrameIndex(
+  points: SeekPoint[],
+  time: number,
+  counted: number,
+  duration: number,
+  fileSize: number,
+): AudioSeekIndex | null {
+  if (counted < 8 || points.length < 3) return null
+  const measured = time > 0 ? time : duration
+  const scale = duration > 0 && measured > 0 ? duration / measured : 1
+  const scaled = scale === 1 ? points : points.map((point) => ({ time: point.time * scale, byte: point.byte }))
+  scaled.push({ time: duration > 0 ? duration : measured, byte: fileSize })
+  return {
+    kind: 'mp3-frames',
+    duration: duration > 0 ? duration : measured,
+    size: fileSize,
+    audioStart: scaled[0].byte,
+    points: scaled,
+  }
+}
+
+async function snapXingByte(blob: Blob, audioStart: number, approx: number) {
+  const from = Math.max(audioStart, approx - 2048)
+  const until = Math.min(blob.size - 1, approx + 4096)
+  if (until < from) return Math.min(blob.size - 1, Math.max(audioStart, approx))
+  const window = await readRange(blob, from, Math.min(blob.size, until + 4))
+  const found = findMpegFrame(window, 0, Math.max(0, until - from))
+  return found ? from + found.offset : Math.min(blob.size - 1, Math.max(audioStart, approx))
+}
+
+async function indexXingAt(blob: Blob, audioStart: number, duration: number): Promise<AudioSeekIndex | null> {
+  const head = await readRange(blob, audioStart, audioStart + XING_HEAD)
+  const limit = Math.min(head.length - 4, 65536)
+  let frame: MpegFrame | null = null
+  for (let offset = 0; offset <= limit; offset += 1) {
+    const candidate = parseMpegFrame(head, offset)
+    if (!candidate) continue
+    const tagAt = xingOffset(candidate)
+    if (tagAt + 8 > head.length) continue
+    const tag = String.fromCharCode(head[tagAt], head[tagAt + 1], head[tagAt + 2], head[tagAt + 3])
+    if (tag === 'Xing' || tag === 'Info') {
+      frame = candidate
+      break
+    }
+  }
+  if (!frame) return null
+  const tagAt = xingOffset(frame)
+  const flags = (head[tagAt + 4] << 24) | (head[tagAt + 5] << 16) | (head[tagAt + 6] << 8) | head[tagAt + 7]
+  let cursor = tagAt + 8
+  let frames = 0
+  if (flags & 0x0001) {
+    if (cursor + 4 > head.length) return null
+    frames = readU32(head, cursor)
+    cursor += 4
+  }
+  if (flags & 0x0002) cursor += 4
+  if (!(flags & 0x0004) || cursor + 100 > head.length) return null
+  const measured = frames > 0 && frame.sampleRate > 0 ? (frames * frame.samples) / frame.sampleRate : 0
+  const total = duration > 0 ? duration : measured
+  if (!(total > 0)) return null
+
+  const first = audioStart + frame.offset
+  const points: SeekPoint[] = [{ time: 0, byte: first }]
+  for (let percent = 1; percent < 100; percent += 1) {
+    const approx = xingByteForFraction(first, blob.size, head[cursor + percent] / 256)
+    points.push({
+      time: (percent / 100) * total,
+      byte: await snapXingByte(blob, first, approx),
+    })
+    if (percent % 10 === 0) await yieldToMain()
+  }
+  points.push({ time: total, byte: blob.size })
+  return { kind: 'mp3-xing', duration: total, size: blob.size, audioStart: first, points }
+}
+
+async function indexMp3Frames(blob: Blob, audioStart: number, duration: number): Promise<AudioSeekIndex | null> {
+  const points: SeekPoint[] = []
+  let cursor = Math.max(0, Math.min(blob.size, audioStart))
+  let time = 0
+  let counted = 0
+  let lastPush = -1
+  let started = false
+
+  while (cursor < blob.size && counted < MAX_FRAMES) {
+    const chunkStart = cursor
+    const chunk = await readRange(blob, chunkStart, chunkStart + FRAME_WINDOW)
+    if (chunk.length < 4) break
+    let local = 0
+    if (!started) {
+      const first = findMpegFrame(chunk, 0, Math.min(chunk.length - 4, 65536))
+      if (!first) return null
+      local = first.offset
+      started = true
+    }
+
+    let resumeAt: number | null = null
+    let stop = false
+    while (local + 4 <= chunk.length && counted < MAX_FRAMES) {
+      let frame = parseMpegFrame(chunk, local)
+      if (!frame) {
+        const lookahead = local + 8192
+        const visible = Math.min(chunk.length - 4, lookahead)
+        frame = findMpegFrame(chunk, local, visible)
+        if (!frame) {
+          if (visible < lookahead && chunkStart + chunk.length < blob.size) resumeAt = chunkStart + local
+          else stop = true
+          break
+        }
+      }
+      const abs = chunkStart + frame.offset
+      if (time - lastPush >= 0.25 || lastPush < 0) {
+        points.push({ time, byte: abs })
+        lastPush = time
+      }
+      time += frame.samples / frame.sampleRate
+      counted += 1
+      local = frame.offset + frame.length
+    }
+    if (stop) break
+    const next = resumeAt ?? chunkStart + local
+    if (next <= cursor) break
+    cursor = next
+    await yieldToMain()
+  }
+
+  return finishFrameIndex(points, time, counted, duration, blob.size)
+}
+
+async function indexMp4ByRanges(blob: Blob, duration: number): Promise<AudioSeekIndex | null> {
+  let offset = 0
+  for (let guard = 0; guard < 64 && offset + 8 <= blob.size; guard += 1) {
+    const header = await readRange(blob, offset, offset + 16)
+    const box = peekBoxHeader(header, blob.size - offset)
+    if (!box) return null
+    if (box.type === 'moov') {
+      if (box.size > MAX_MOOV) return null
+      const moov = await readRange(blob, offset, offset + box.size)
+      return readMp4Index(moov, duration, blob.size)
+    }
+    const next = offset + box.size
+    if (next <= offset) return null
+    offset = next
+    await yieldToMain()
+  }
+  return null
+}
+
+/**
+ * Seek index for a downloaded episode.
+ * Reads the ID3 size, Xing/Info table, or moov box in small slices.
+ * Never copies the whole file into one ArrayBuffer — a long MP3 is ~100MB,
+ * and that copy on top of the playing audio kills the iOS tab.
+ */
+export async function indexAudioBlob(blob: Blob, duration = 0): Promise<AudioSeekIndex> {
+  const header = await readRange(blob, 0, 16)
+  const id3 = Math.min(blob.size, id3AudioStart(header))
+  const mime = (blob.type || '').toLowerCase()
+  const mp4 = !id3 && looksLikeMp4(mime, header, blob.size)
+  if (mp4) {
+    const indexed = await indexMp4ByRanges(blob, duration)
+    if (indexed) return indexed
+  }
+  const xing = await indexXingAt(blob, id3, duration)
+  if (xing) return xing
+  const frames = await indexMp3Frames(blob, id3, duration)
+  if (frames) return frames
+  if (!mp4) {
+    const indexed = await indexMp4ByRanges(blob, duration)
+    if (indexed) return indexed
+  }
+  return linearIndex(blob.size, duration > 0 ? duration : 0, id3)
 }
 
 export function buildAudioSeekIndex(bytes: Uint8Array, mime: string, duration: number): AudioSeekIndex {
@@ -202,7 +420,7 @@ function readXingIndex(bytes: Uint8Array, duration: number): AudioSeekIndex | nu
     const points: SeekPoint[] = [{ time: 0, byte: first.offset }]
     for (let percent = 1; percent < 100; percent += 1) {
       const frac = bytes[cursor + percent] / 256
-      const approx = first.offset + Math.floor(frac * (bytes.length - first.offset))
+      const approx = xingByteForFraction(first.offset, bytes.length, frac)
       const snapped = findMpegFrame(bytes, Math.max(first.offset, approx - 2048), approx + 4096)
       points.push({
         time: (percent / 100) * duration,
@@ -305,7 +523,7 @@ function findDeep(bytes: Uint8Array, start: number, end: number, path: string[])
   return box
 }
 
-function readMp4Index(bytes: Uint8Array, duration: number): AudioSeekIndex | null {
+function readMp4Index(bytes: Uint8Array, duration: number, fileSize = bytes.length): AudioSeekIndex | null {
   const moov = findBox(bytes, 0, bytes.length, 'moov')
   if (!moov) return null
   let audio: Box | undefined
@@ -400,6 +618,6 @@ function readMp4Index(bytes: Uint8Array, duration: number): AudioSeekIndex | nul
   if (points.length < 2) return null
   const measured = mediaTime / timescale
   const total = duration > 0 ? duration : measured
-  points.push({ time: total, byte: bytes.length })
-  return { kind: 'mp4', duration: total, size: bytes.length, audioStart: points[0].byte, points }
+  points.push({ time: total, byte: fileSize })
+  return { kind: 'mp4', duration: total, size: fileSize, audioStart: points[0].byte, points }
 }

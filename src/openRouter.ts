@@ -1,4 +1,4 @@
-import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, readAudioDuration, audioFormatFromBlob, createAudioContext } from './audioTranscript'
+import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, audioFormatFromBlob, createAudioContext } from './audioTranscript'
 import { indexAudioBlob, sliceBySeekIndex } from './audioSeek'
 import { refineAdSegments } from './adRefine'
 import { mergeOverlappingSegments, normalizeSegments } from './adParse'
@@ -585,6 +585,8 @@ export async function detectAdSegmentsFromAudio(options: {
   audioBlob: Blob
   sttModel?: string
   maxMinutes?: number
+  /** Playback clock when this episode is already loaded. Avoids opening a second audio element. */
+  durationHint?: number
   existingCues?: TranscriptCue[]
   existingRanges?: TimeRange[]
   signal?: AbortSignal
@@ -596,6 +598,7 @@ export async function detectAdSegmentsFromAudio(options: {
     audioBlob: options.audioBlob,
     sttModel: options.sttModel,
     maxMinutes: options.maxMinutes,
+    durationHint: options.durationHint,
     existingCues: options.existingCues,
     existingRanges: options.existingRanges,
     signal: options.signal,
@@ -622,6 +625,7 @@ export async function transcribeEpisodeBlob(options: {
   audioBlob: Blob
   sttModel?: string
   maxMinutes?: number
+  durationHint?: number
   existingCues?: TranscriptCue[]
   existingRanges?: TimeRange[]
   signal?: AbortSignal
@@ -640,8 +644,11 @@ export async function transcribeEpisodeBlob(options: {
     memory: memorySnapshot(),
   })
   throwIfAborted(options.signal)
-  options.onProgress?.('Reading downloaded audio…')
-  const fullDuration = await readAudioDuration(blob)
+  options.onProgress?.('Indexing episode audio…')
+  const hinted = options.durationHint && options.durationHint > 0 ? options.durationHint : 0
+  const seekIndex = await indexAudioBlob(blob, hinted)
+  const fullDuration = seekIndex.duration
+  if (!(fullDuration > 1)) throw new Error('Could not read audio duration.')
   const windowSeconds = options.maxMinutes && options.maxMinutes > 0
     ? Math.min(fullDuration, options.maxMinutes * 60)
     : fullDuration
@@ -673,9 +680,11 @@ export async function transcribeEpisodeBlob(options: {
     return { cues, durationSeconds: windowSeconds, ranges: mergeRanges(cached) }
   }
 
-  options.onProgress?.('Indexing episode audio…')
-  const seekIndex = await indexAudioBlob(blob, fullDuration)
-  appLog('info', 'audio index', { kind: seekIndex.kind, points: seekIndex.points.length })
+  appLog('info', 'audio index', {
+    kind: seekIndex.kind,
+    points: seekIndex.points.length,
+    fileBytes: blob.size,
+  })
 
   options.onProgress?.(transcribeProgress(0, needed.length, concurrency, skippedChunks))
 

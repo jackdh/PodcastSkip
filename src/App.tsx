@@ -768,6 +768,13 @@ function App() {
       noteScan(`Analysing ${windowLabel}…`)
       const existing = scansByEpisode[episode.id]
       const reuseCache = existing && (!existing.sttModel || existing.sttModel === sttModel)
+      const liveDuration = audioRef.current?.duration
+      const durationHint = activeEpisode?.id === episode.id
+        && liveDuration
+        && Number.isFinite(liveDuration)
+        && liveDuration > 0
+        ? liveDuration
+        : undefined
       const { segments, cues, ranges } = await detectAdSegmentsFromAudio({
         apiKey,
         model,
@@ -776,6 +783,7 @@ function App() {
         show: episode.show,
         description: episode.description,
         audioBlob,
+        durationHint,
         maxMinutes: windowMinutes > 0 ? windowMinutes : undefined,
         existingCues: reuseCache ? existing.cues : undefined,
         existingRanges: reuseCache ? existing.ranges : undefined,

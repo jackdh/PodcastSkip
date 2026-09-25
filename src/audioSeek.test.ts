@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   byteAtTime,
   buildAudioSeekIndex,
+  indexAudioBlob,
   linearByteAt,
   parseMpegFrame,
   sliceBySeekIndex,
@@ -116,7 +117,7 @@ describe('Xing TOC', () => {
 })
 
 describe('M4A sample table', () => {
-  it('uses chunk offsets so a large early sample does not shift later clocks', () => {
+  it('uses chunk offsets so a large early sample does not shift later clocks', async () => {
     const mdhdPayload = concat([
       new Uint8Array(4),
       u32(0), u32(0),
@@ -148,10 +149,102 @@ describe('M4A sample table', () => {
     const file = new Uint8Array(mdatStart + 8000 + 9 * 200)
     file.set(moov, 0)
     const index = buildAudioSeekIndex(file, 'audio/mp4', 10)
+    const streamed = await indexAudioBlob(new Blob([file], { type: 'audio/mp4' }), 10)
     expect(index.kind).toBe('mp4')
+    expect(streamed.kind).toBe('mp4')
+    expect(streamed.points.map((point) => point.byte)).toEqual(index.points.map((point) => point.byte))
     expect(byteAtTime(index, 0)).toBe(mdatStart)
     expect(byteAtTime(index, 1)).toBe(mdatStart + 8000)
     expect(linearByteAt(file.length, 10, 1)).not.toBe(mdatStart + 8000)
+  })
+})
+
+function id3(payloadSize: number) {
+  const bytes = new Uint8Array(10 + payloadSize)
+  bytes.set([0x49, 0x44, 0x33, 4, 0, 0], 0)
+  bytes[6] = (payloadSize >> 21) & 0x7f
+  bytes[7] = (payloadSize >> 14) & 0x7f
+  bytes[8] = (payloadSize >> 7) & 0x7f
+  bytes[9] = payloadSize & 0x7f
+  bytes.fill(0xab, 10)
+  return bytes
+}
+
+class CountingBlob extends Blob {
+  ranges: Array<{ start: number; end: number }> = []
+  slice(start?: number, end?: number, contentType?: string) {
+    const from = start ?? 0
+    const to = end ?? this.size
+    this.ranges.push({ start: from, end: to })
+    return super.slice(start, end, contentType)
+  }
+}
+
+describe('indexAudioBlob memory', () => {
+  it('matches an in-memory frame index without reading the whole file at once', async () => {
+    const loud = Array.from({ length: 400 }, () => mpegFrame(128))
+    const quiet = Array.from({ length: 3400 }, () => mpegFrame(32))
+    const bytes = concat([...loud, ...quiet])
+    const blob = new CountingBlob([bytes], { type: 'audio/mpeg' })
+    const streamed = await indexAudioBlob(blob, 0)
+    const full = buildAudioSeekIndex(bytes, 'audio/mpeg', 0)
+    expect(streamed.kind).toBe('mp3-frames')
+    expect(streamed.duration).toBeCloseTo(full.duration, 5)
+    expect(streamed.points.map((point) => point.byte)).toEqual(full.points.map((point) => point.byte))
+    expect(blob.size).toBeGreaterThan(256 * 1024)
+    expect(blob.ranges.every((range) => range.end - range.start <= 256 * 1024)).toBe(true)
+  })
+
+  it('reads a Xing table past a large ID3 tag without loading the tag or the rest of the file', async () => {
+    const size = 20_000
+    const audio = new Uint8Array(size)
+    const header = mpeg1Layer3Header(128)
+    audio.set(header, 0)
+    const frame = parseMpegFrame(audio, 0)
+    if (!frame) throw new Error('expected a frame')
+    const tagAt = frame.offset + 4 + 32
+    audio.set(Array.from('Xing').map((char) => char.charCodeAt(0)), tagAt)
+    audio.set([0, 0, 0, 7], tagAt + 4)
+    const frames = 44100
+    audio[tagAt + 8] = (frames >> 24) & 0xff
+    audio[tagAt + 9] = (frames >> 16) & 0xff
+    audio[tagAt + 10] = (frames >> 8) & 0xff
+    audio[tagAt + 11] = frames & 0xff
+    const tocAt = tagAt + 8 + 8
+    for (let percent = 0; percent < 100; percent += 1) {
+      audio[tocAt + percent] = percent < 50 ? Math.round((percent / 50) * 32) : 32 + Math.round(((percent - 50) / 50) * 224)
+    }
+    const prefix = id3(180_000)
+    const blob = new CountingBlob([prefix, audio], { type: 'audio/mpeg' })
+    const index = await indexAudioBlob(blob, 100)
+    const memory = buildAudioSeekIndex(audio, 'audio/mpeg', 100)
+    expect(index.kind).toBe('mp3-xing')
+    expect(index.audioStart).toBe(prefix.length)
+    expect(byteAtTime(index, 50) - prefix.length).toBe(byteAtTime(memory, 50))
+    const tagBody = blob.ranges.filter((range) => range.start < prefix.length && range.end > 16)
+    expect(tagBody).toEqual([])
+    expect(blob.ranges.every((range) => range.end - range.start <= 64 * 1024)).toBe(true)
+    expect(blob.size).toBeGreaterThan(64 * 1024)
+  })
+
+  it('takes duration from the Xing frame count when playback has not loaded', async () => {
+    const audio = new Uint8Array(2048)
+    const header = mpeg1Layer3Header(128)
+    audio.set(header, 0)
+    const frame = parseMpegFrame(audio, 0)
+    if (!frame) throw new Error('expected a frame')
+    const tagAt = frame.offset + 4 + 32
+    audio.set(Array.from('Info').map((char) => char.charCodeAt(0)), tagAt)
+    audio.set([0, 0, 0, 5], tagAt + 4)
+    const frames = 225244
+    audio[tagAt + 8] = (frames >> 24) & 0xff
+    audio[tagAt + 9] = (frames >> 16) & 0xff
+    audio[tagAt + 10] = (frames >> 8) & 0xff
+    audio[tagAt + 11] = frames & 0xff
+    for (let percent = 0; percent < 100; percent += 1) audio[tagAt + 12 + percent] = Math.round((percent / 99) * 255)
+    const index = await indexAudioBlob(new Blob([audio], { type: 'audio/mpeg' }), 0)
+    expect(index.kind).toBe('mp3-xing')
+    expect(index.duration).toBeCloseTo((frames * 1152) / 44100, 5)
   })
 })
 
