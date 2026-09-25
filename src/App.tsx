@@ -36,6 +36,7 @@ import { playbackAdSegments } from './adRefine'
 import { isAbortError, rangesFromCues, type TimeRange } from './scanCache'
 import { playbackErrorMessage, readNowPlaying, resumePosition, writeNowPlaying } from './playbackState'
 import { scanProgressCopy } from './scanProgress'
+import { deleteDownloadedAudio, hasDownloadedAudio, openDownloadedAudio, saveDownloadedAudio } from './downloadedAudio'
 import { readJson, readText, writeJson, writeText } from './storage'
 
 type AdSegmentMap = Record<string, AdSegment[]>
@@ -255,7 +256,11 @@ function App() {
       const retained = []
       for (const episode of downloadedEpisodes) {
         const source = playbackUrl(episode)
-        if (source && await cache.match(source)) retained.push(episode)
+        if (!source) continue
+        const onDisk = await hasDownloadedAudio(source)
+        const inCache = onDisk ? null : await cache.match(source)
+        await inCache?.body?.cancel().catch(() => undefined)
+        if (onDisk || inCache) retained.push(episode)
       }
       if (retained.length !== downloadedEpisodes.length) setDownloadedEpisodes(retained)
     }).catch(() => undefined)
@@ -349,13 +354,16 @@ function App() {
     }
 
     const blobUrlFromCache = async () => {
-      if (!('caches' in window)) return null
       try {
-        const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
-        if (!cached) return null
-        const blob = await cached.blob()
-        const copy = blob.slice(0, blob.size, blob.type || 'audio/mpeg')
-        return URL.createObjectURL(copy)
+        const already = await hasDownloadedAudio(source)
+        if (!already) {
+          if (!('caches' in window)) return null
+          const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
+          if (!cached) return null
+          await cached.body?.cancel().catch(() => undefined)
+          setToast('Preparing offline audio…')
+        }
+        return URL.createObjectURL(await openDownloadedAudio(source))
       } catch {
         return null
       }
@@ -369,7 +377,7 @@ function App() {
       previous?.pause()
       previous?.remove()
       audio = document.createElement('audio')
-      audio.preload = fromCache ? 'auto' : 'metadata'
+      audio.preload = 'metadata'
       audio.setAttribute('playsinline', '')
       audio.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none'
       audio.src = playableUrl
@@ -568,6 +576,7 @@ function App() {
     if (isDownloaded) {
       downloadAbortRef.current.get(episode.id)?.abort()
       await caches.open(downloadCacheName).then((cache) => cache.delete(source))
+      await deleteDownloadedAudio(source)
       setDownloadedEpisodes((items) => items.filter((item) => item.id !== episode.id))
       setAdSegmentsByEpisode((current) => {
         if (!(episode.id in current)) return current
@@ -600,25 +609,13 @@ function App() {
       const response = await fetch(source, { signal: controller.signal })
       if (!response.ok) throw new Error(navigator.onLine === false ? 'You are offline. Connect to download this episode.' : 'Unable to fetch audio')
       const total = Number(response.headers.get('content-length') ?? 0)
-      let stored: Response = response
-      if (response.body) {
-        const reader = response.body.getReader()
-        const chunks: Uint8Array[] = []
-        let received = 0
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          if (value) {
-            chunks.push(value)
-            received += value.byteLength
-            if (total) setDownloadProgress((current) => ({ ...current, [episode.id]: received / total }))
-          }
-        }
-        const blob = new Blob(chunks as BlobPart[], { type: response.headers.get('content-type') || 'audio/mpeg' })
-        stored = new Response(blob, { status: 200, headers: response.headers })
-      }
-      await caches.open(downloadCacheName).then((cache) => cache.put(source, stored.clone()))
-      const downloadBytes = Number(stored.headers.get('content-length') ?? total)
+      let lastNoted = 0
+      const saved = await saveDownloadedAudio(source, response, (received) => {
+        if (!total || (received - lastNoted < 256 * 1024 && received < total)) return
+        lastNoted = received
+        setDownloadProgress((current) => ({ ...current, [episode.id]: received / total }))
+      })
+      const downloadBytes = saved.size || total
       setDownloadedEpisodes((items) => [...items.filter((item) => item.id !== episode.id), { ...episode, downloadBytes }])
       void refreshStorageUsage()
       setToast(`Downloaded ${formatBytes(downloadBytes)} for offline listening`)
@@ -760,10 +757,15 @@ function App() {
       memory: memorySnapshot(),
     })
     try {
-      const cached = await caches.open(downloadCacheName).then((cache) => cache.match(source))
-      if (!cached) throw new Error('Download this episode first so we can analyse the audio.')
-      const audioBlob = await cached.blob()
-      appLog('info', 'highlight ads blob', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
+      let lastNoted = 0
+      const audioBlob = await openDownloadedAudio(source, {
+        onBytes: (bytes) => {
+          if (bytes - lastNoted < 1024 * 1024) return
+          lastNoted = bytes
+          noteScan(`Preparing “${episode.title}”… ${formatBytes(bytes)}`)
+        },
+      })
+      appLog('info', 'highlight ads file', { bytes: audioBlob.size, type: audioBlob.type || 'unknown', memory: memorySnapshot() })
       const windowLabel = windowMinutes > 0 ? `the first ${windowMinutes} minutes` : 'the full episode'
       noteScan(`Analysing ${windowLabel}…`)
       const existing = scansByEpisode[episode.id]

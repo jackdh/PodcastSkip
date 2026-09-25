@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  assertChunkSlice,
   byteAtTime,
   buildAudioSeekIndex,
   indexAudioBlob,
   linearByteAt,
+  MAX_CHUNK_SLICE_BYTES,
   parseMpegFrame,
   sliceBySeekIndex,
   timeAtByte,
@@ -264,5 +266,10 @@ describe('sliceBySeekIndex clocks', () => {
     const slice = sliceBySeekIndex(new Blob([new Uint8Array(10_000)]), index, 20, 25, 0)
     expect(slice.offsetSeconds).toBeCloseTo(20, 5)
     expect(linearByteAt(10_000, 100, 20)).toBe(2000)
+  })
+
+  it('refuses a slice large enough to be the whole episode', () => {
+    expect(() => assertChunkSlice(MAX_CHUNK_SLICE_BYTES)).not.toThrow()
+    expect(() => assertChunkSlice(MAX_CHUNK_SLICE_BYTES + 1)).toThrow(/Refusing to load/)
   })
 })

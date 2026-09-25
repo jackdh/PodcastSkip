@@ -88,6 +88,15 @@ export function linearIndex(size: number, duration: number, audioStart = 0): Aud
   }
 }
 
+/** A 45s speech chunk is well under this. A larger slice is the whole episode slipping through. */
+export const MAX_CHUNK_SLICE_BYTES = 8 * 1024 * 1024
+
+export function assertChunkSlice(byteLength: number) {
+  if (byteLength > MAX_CHUNK_SLICE_BYTES) {
+    throw new Error(`Refusing to load a ${byteLength}-byte audio slice into memory.`)
+  }
+}
+
 export function sliceBySeekIndex(
   blob: Blob,
   index: AudioSeekIndex,

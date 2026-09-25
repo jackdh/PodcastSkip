@@ -1,5 +1,5 @@
 import { decodeEpisodeAudio, encodeWavChunkAt, wavChunkCount, arrayBufferToBase64, encodeWav, audioFormatFromBlob, createAudioContext } from './audioTranscript'
-import { indexAudioBlob, sliceBySeekIndex } from './audioSeek'
+import { assertChunkSlice, indexAudioBlob, sliceBySeekIndex } from './audioSeek'
 import { refineAdSegments } from './adRefine'
 import { mergeOverlappingSegments, normalizeSegments } from './adParse'
 import { appLog, memorySnapshot } from './appLog'
@@ -703,6 +703,7 @@ export async function transcribeEpisodeBlob(options: {
     await runPool(needed, concurrency, async (range) => {
       throwIfAborted(options.signal)
       const slice = sliceBySeekIndex(blob, seekIndex, range.start, range.end)
+      assertChunkSlice(slice.blob.size)
       appLog('info', 'chunk', {
         start: Number(range.start.toFixed(1)),
         end: Number(range.end.toFixed(1)),
